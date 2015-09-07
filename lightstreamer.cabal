@@ -22,6 +22,7 @@ library
   -- other-modules:       
   -- other-extensions:    
   build-depends:
+    attoparsec        >= 0.13   && < 13.1,
     base              >= 4.7    && < 4.8,
     bytestring        >= 0.10   && < 0.11,
     HTTP              >= 4000.2 && < 4000.3,
