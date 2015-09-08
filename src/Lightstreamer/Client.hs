@@ -2,8 +2,10 @@
 
 module Lightstreamer.Client where
 
-import Data.Functor ((<$>))
+import Control.Monad.Trans.State.Lazy (evalState, modify, get)
+
 import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine, decimal, double)
+import Data.Functor ((<$>))
 
 import Network.HTTP (sendHTTP)
 import Network.HTTP.Base (RequestMethod(POST), Response(..), Request(rqHeaders)
@@ -19,16 +21,15 @@ import qualified Data.ByteString as BS
 import qualified Network.Socket as S
 
 data StreamRequest = StreamRequest
-    { srAdapterSet :: BS.ByteString
+    { srAdapterSet :: String 
     , srConnectionMode :: Either KeepAliveMode PollingMode
     , srContentLength :: Maybe Int
     , srHost :: String 
-    , srPassword :: BS.ByteString
-    , srPath :: String
+    , srPassword :: Maybe String 
     , srPort :: Int
     , srRequestedMaxBandwidth :: Maybe Double
     , srReportInfo :: Maybe Bool
-    , srUser :: BS.ByteString
+    , srUser ::  Maybe String 
     }
 
 data KeepAliveMode = KeepAliveMode Int
@@ -40,12 +41,12 @@ data PollingMode = PollingMode
 
 data StreamInfo = StreamInfo
     { controlLink :: Maybe BS.ByteString
-    , keepAliveInMilli :: Int
-    , maxBandwidth :: Double
+    , keepAliveInMilli :: !Int
+    , maxBandwidth :: !Double
     , preamble :: Maybe BS.ByteString
     , requestLimit :: Maybe Int
     , serverName :: Maybe BS.ByteString
-    , sessionId :: BS.ByteString
+    , sessionId :: !BS.ByteString
     } deriving Show
 
 data StreamConnection = StreamConnection
@@ -53,6 +54,19 @@ data StreamConnection = StreamConnection
     }
 
 data LsError = LsError Int BS.ByteString | ConnectionError String deriving Show
+
+defaultStreamRequest :: String -> String -> Int -> StreamRequest
+defaultStreamRequest adapter host port = StreamRequest
+    { srAdapterSet = adapter
+    , srConnectionMode = Left $ KeepAliveMode 600
+    , srContentLength = Nothing
+    , srHost = host
+    , srPassword = Nothing
+    , srPort = port
+    , srRequestedMaxBandwidth = Nothing
+    , srReportInfo = Nothing
+    , srUser = Nothing 
+    }
 
 newStreamConnection :: StreamRequest -> IO (Either LsError StreamInfo)
 newStreamConnection req = do 
@@ -90,10 +104,28 @@ newStreamConnection req = do
             { uriScheme = ""
             , uriAuthority = Nothing
             , uriPath = "/lightstreamer/create_session.txt"
-            , uriQuery = "?LS_op2=create&LS_cause=new.api&LS_polling=true&LS_polling_millis=0&LS_idle_millis=0&LS_cid=mgQkwtwdysogQz2BJ4Ji%20kOj2Bg&LS_adapter_set=WELCOME"
+            , uriQuery = buildStreamQueryString req 
             , uriFragment = ""
             }
         retConnErr = return . Left . ConnectionError
+
+buildStreamQueryString :: StreamRequest -> String
+buildStreamQueryString sr = flip evalState initial $ do
+    appendM ("&LS_user=" ++) $ srUser sr
+    appendM ("&LS_password=" ++) $ srPassword sr
+    case srConnectionMode sr of
+      Left (KeepAliveMode x) -> append $ "&LS_keepalive_millis=" ++ show x
+      Right y -> append $ "&LS_polling=true&LS_polling_millis=" ++ show (pollingMillis y) ++
+                          "&LS_idle_millis" ++ show (idelMillis y)
+    appendM ((++) "&LS_content_length" . show) $ srContentLength sr
+    appendM ((++) "&LS_report_info" . show) $ srReportInfo sr
+    appendM ((++) "&LS_requested_max_bandwith=" . show) $ srRequestedMaxBandwidth sr
+    append "?"
+    get
+    where
+        initial = "&LS_op2=create&LS_cid=mgQkwtwdysogQz2BJ4Ji%20kOj2Bg&LS_adapter_set=" ++ srAdapterSet sr 
+        append val = modify (\s -> val ++ s)
+        appendM f = maybe (return ()) (append . f)
 
 streamInfoParser :: AB.Parser (Either LsError StreamInfo)
 streamInfoParser = AB.eitherP streamInfoErrParser streamInfoOkParser

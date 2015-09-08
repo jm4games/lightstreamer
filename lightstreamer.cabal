@@ -29,6 +29,7 @@ library
     http-conduit      >= 2.1    && < 2.2,
     network           >= 2.3    && < 2.7,
     network-uri       >= 2.6    && < 2.7,
+    transformers      >= 0.4.3  && < 0.4.4,
     websockets        >= 0.9    && < 0.10
 
   hs-source-dirs:      src
