@@ -19,12 +19,16 @@ cabal-version:       >=1.10
 library
   exposed-modules:     
     Lightstreamer.Client
-  -- other-modules:       
+  other-modules:       
+    Lightstreamer.Http
+
   -- other-extensions:    
   build-depends:
     attoparsec        >= 0.13   && < 13.1,
     base              >= 4.7    && < 4.8,
     bytestring        >= 0.10   && < 0.11,
+    conduit           >= 1.2    && < 1.3,
+    conduit-extra     >= 1.1.9  && < 1.2,
     HTTP              >= 4000.2 && < 4000.3,
     http-conduit      >= 2.1    && < 2.2,
     network           >= 2.3    && < 2.7,

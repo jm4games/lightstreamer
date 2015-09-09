@@ -7,12 +7,15 @@ import Control.Monad.Trans.State.Lazy (evalState, modify, get)
 import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine, decimal, double)
 import Data.Functor ((<$>))
 
+import Lightstreamer.Http
+
+import Network.BufferType (buf_fromStr, bufferOps)
 import Network.HTTP (sendHTTP)
-import Network.HTTP.Base (RequestMethod(POST), Response(..), Request(rqHeaders)
+import Network.HTTP.Base (RequestMethod(POST), Response(..), Request(rqHeaders, rqBody)
                          , defaultNormalizeRequestOptions, mkRequest, normalizeRequest)
 import Network.HTTP.Headers (HeaderName(HdrHost), mkHeader)
 import Network.Stream (ConnError(..))
-import Network.TCP (HandleStream, socketConnection)
+import Network.TCP (HandleStream, socketConnection, writeBlock)
 import Network.URI (URI(..))
 
 import qualified Data.Attoparsec.ByteString as AB
@@ -77,6 +80,7 @@ newStreamConnection req = do
           sock <- S.socket (S.addrFamily a) S.Stream S.defaultProtocol
           S.connect sock (S.addrAddress a)
           conn <- socketConnection (srHost req) (srPort req) sock :: IO (HandleStream BS.ByteString)
+          mySendHTTP conn request
           result <- sendHTTP conn request 
           case result of
             Left x -> retConnErr $ 
@@ -108,6 +112,12 @@ newStreamConnection req = do
             , uriFragment = ""
             }
         retConnErr = return . Left . ConnectionError
+
+mySendHTTP :: HandleStream BS.ByteString -> Request BS.ByteString -> IO ()
+mySendHTTP stream req = do
+    _ <- writeBlock stream (buf_fromStr bufferOps $ show req)
+    _ <- writeBlock stream (rqBody req)
+    return ()
 
 buildStreamQueryString :: StreamRequest -> String
 buildStreamQueryString sr = flip evalState initial $ do
