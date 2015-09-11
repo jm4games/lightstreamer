@@ -1,8 +1,10 @@
+{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 
 module Lightstreamer.Http
     ( HttpConnection
+    , HttpException(..)
     , HttpHeader(..)
     , HttpResponse
         ( resBody
@@ -15,15 +17,18 @@ module Lightstreamer.Http
     , sendHttpRequest
     ) where
 
-import Control.Monad.IO.Class (MonadIO)
+import Control.Concurrent (ThreadId, forkIO)
+import Control.Exception (Exception, throwIO)
+import Control.Monad (unless)
+import Control.Monad.IO.Class (MonadIO(..))
 
 import Data.ByteString.Char8 (readInt)
 import Data.ByteString.Lazy (toStrict)
-import Data.Conduit (Consumer, Producer, ($$+), ($$+-), await, closeResumableSource)
+import Data.Conduit (Consumer, Conduit, Producer, ($$+), ($$+-), ($=+), await, leftover)
 import Data.Conduit.Network (sourceSocket)
 import Data.Functor ((<$>))
 import Data.List (find)
-import Data.Word8 (_colon, _space)
+import Data.Typeable (Typeable)
 
 import Network.BufferType (buf_fromStr, bufferOps)
 import Network.HTTP.Base (Request(rqBody))
@@ -31,6 +36,7 @@ import Network.TCP (HandleStream, socketConnection, writeBlock)
 
 import qualified Data.ByteString as B
 import qualified Data.Conduit.Binary as CB
+import qualified Data.Word8 as W
 
 import qualified Network.Socket as S
 
@@ -39,9 +45,13 @@ data HttpConnection = HttpConnection
     , socket :: S.Socket
     } 
 
+data HttpException = HttpException B.ByteString deriving (Show, Typeable)
+
+instance Exception HttpException where
+    
 data HttpHeader = HttpHeader B.ByteString B.ByteString
 
-data HttpBody = StreamingBody | ContentBody B.ByteString | None
+data HttpBody = StreamingBody ThreadId | ContentBody B.ByteString | None
 
 data HttpResponse = HttpResponse
     { resBody :: HttpBody 
@@ -67,50 +77,67 @@ sendHttpRequest (HttpConnection { connection = conn }) req = do
     _ <- writeBlock conn (rqBody req)
     return ()
 
-httpConnectionProducer :: MonadIO m => HttpConnection -> Producer m B.ByteString
+httpConnectionProducer :: HttpConnection -> Producer IO B.ByteString
 httpConnectionProducer (HttpConnection { socket = sock }) = sourceSocket sock
 
-readHttpResponse :: Monad m
-                 => Maybe HttpResponse 
-                 -> Consumer B.ByteString m (Either B.ByteString HttpResponse)
-readHttpResponse res = do
-    maybeVal <- await
-    case maybeVal of
-      Nothing -> response 
-      Just val ->
-        if B.null val then response 
-        else case res of
-                Just a -> 
-                  let header = uncurry HttpHeader $ B.breakByte _colon val 
-                  in readHttpResponse $ Just a { resHeaders = header : resHeaders a } 
-
-                Nothing ->
-                  let top = B.split _space val
-                  in case top of
-                       [_, code, msg] -> readHttpResponse $ Just HttpResponse
-                                            { resStatusCode = maybe 0 fst $ readInt code
-                                            , resReason = msg
-                                            , resHeaders = []
-                                            , resBody = None
-                                            }
-                       _ -> return $ Left "Invalid HTTP response."
-    where response = return $ maybe (Left "No response received.") Right res 
-
-readStreamedResponse :: MonadIO m
-                     => HttpConnection 
-                     -> Consumer B.ByteString m () 
-                     -> m (Either B.ByteString HttpResponse)
+readStreamedResponse :: HttpConnection 
+                     -> Consumer B.ByteString IO () 
+                     -> IO (Either B.ByteString HttpResponse)
 readStreamedResponse conn streamSink = do 
-    (rSrc, result) <- httpConnectionProducer conn $$+ readHttpResponse Nothing
-    case result of
-      Left err -> closeResumableSource rSrc >> (return $ Left err)
-      Right res -> 
-        case find contentHeader $ resHeaders res of
-          Just (HttpHeader _ val) -> do
-              body <- rSrc $$+- (CB.take . maybe 0 fst $ readInt val)
-              return $ Right res { resBody = ContentBody $ toStrict body } 
-          Nothing -> undefined
+    (rSrc, res) <- httpConnectionProducer conn $$+ readHttpHeader
+    case find contentHeader $ resHeaders res of
+      Just (HttpHeader "Content-Length" val) -> do
+        body <- rSrc $$+- (CB.take . maybe 0 fst $ readInt val)
+        return $ Right res { resBody = ContentBody $ toStrict body } 
+      
+      Just (HttpHeader "Transfer-Encoding" _) -> do
+        tId <- forkIO (rSrc $=+ chunkConduit [] $$+- streamSink)
+        return $ Right res { resBody = StreamingBody tId }
+      _ -> 
+        throwIO $ HttpException "Could not determine body type of response."
+                
     where
         contentHeader (HttpHeader "Content-Length" _) = True
+        contentHeader (HttpHeader "Transfer-Encoding" _) = True
         contentHeader _ = False
 
+readHttpHeader :: MonadIO m => Consumer B.ByteString m HttpResponse
+readHttpHeader = loop [] Nothing 
+    where
+        loop acc res = await >>= maybe (complete acc res) (build acc res)
+        
+        complete acc (Just res) = do
+            unless (null acc) $ leftover (B.concat $ reverse acc)
+            return res
+        complete _ Nothing = liftIO . throwIO $ HttpException "No response provided."
+
+        build acc res more = 
+            case B.uncons p2 of
+              -- dropping \r
+              Just (_, rest) 
+                | rest == B.singleton W._lf && null acc -> complete [] res
+                | otherwise -> 
+                  -- dropping \n
+                  case parse (B.drop 1 . B.concat . reverse $ p1:acc) res of
+                    Left err -> liftIO . throwIO $ HttpException err 
+                    Right res' -> build [] res' rest
+
+              Nothing -> loop (p1:acc) res
+            where 
+                (p1, p2) = B.breakByte W._cr more  
+                parse bytes Nothing = 
+                    let top = B.split W._space bytes
+                    in case top of
+                         [_, code, msg] -> Right $ Just HttpResponse
+                                              { resStatusCode = maybe 0 fst $ readInt code
+                                              , resReason = msg
+                                              , resHeaders = []
+                                              , resBody = None
+                                              }
+                         _ -> Left "Invalid HTTP response."
+                parse bytes (Just a) =
+                    let header = uncurry HttpHeader $ B.breakByte W._colon bytes
+                    in Right $ Just a { resHeaders = header : resHeaders a } 
+
+chunkConduit :: MonadIO m => [[B.ByteString]] -> Conduit B.ByteString m B.ByteString 
+chunkConduit = undefined
