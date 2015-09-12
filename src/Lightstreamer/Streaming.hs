@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Lightstreamer.StreamConnection where
+module Lightstreamer.Streaming where
 
-import Data.Attoparsec.ByteString (Parser, string, takeTill)
+import Control.Monad (forM_)
+import Control.Monad.IO.Class (liftIO)
+
+import Data.Attoparsec.ByteString (Parser, parseOnly, many', string, takeTill)
 import Data.Attoparsec.ByteString.Char8 (eitherP, endOfLine, isEndOfLine
                                         , decimal, double, option)
 import Data.ByteString (ByteString)
-import Data.Conduit (Consumer)
+import Data.Conduit (Consumer, await)
 import Data.Functor ((<$>))
 
 import Lightstreamer.Error
@@ -15,7 +18,7 @@ data StreamInfo = StreamInfo
     { controlLink :: Maybe ByteString
     , keepAliveInMilli :: !Int
     , maxBandwidth :: !Double
-    , preamble :: Maybe ByteString
+    , preamble :: [ByteString]
     , requestLimit :: Maybe Int
     , serverName :: Maybe ByteString
     , sessionId :: !ByteString
@@ -25,11 +28,19 @@ data StreamConnection = StreamConnection
     { streamInfo :: StreamInfo
     }
 
-streamingInfoConsumer :: Consumer ByteString m (Either LsError StreamInfo)
-streamingInfoConsumer = undefined
-
-streamInfoResposneParser :: Parser (Either LsError StreamInfo)
-streamInfoResposneParser = eitherP errorParser streamInfoParser
+streamConsumer :: Consumer [ByteString] IO () 
+streamConsumer = 
+    await >>= maybe (liftIO $ putStrLn "No initial stream input ") consumeInfo
+    where
+        consumeInfo [] = streamConsumer
+        consumeInfo (x:xs) = do
+            let info = parseOnly streamInfoParser x
+            liftIO $ putStrLn "Stream Info:"
+            liftIO $ print info
+            consumeValues xs
+        loopConsume = await >>= maybe (return ()) consumeValues
+        consumeValues [] = loopConsume 
+        consumeValues values = liftIO (forM_ values print) >> loopConsume
 
 streamInfoParser :: Parser StreamInfo
 streamInfoParser = do
@@ -41,7 +52,7 @@ streamInfoParser = do
     maxB <- parseDblField "MaxBandwidth:"
     reqLimit <- parseOptional $ parseIntField "RequestLimit:"
     srv <- parseOptional $ parseTxtField "ServerName:"
-    pre <- parseOptional $ parseTxtField "Preamble:"
+    pre <- many' $ parseTxtField "Preamble:"
     endOfLine
     return StreamInfo
         { controlLink = ctrlLink
