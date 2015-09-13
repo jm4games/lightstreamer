@@ -1,18 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Lightstreamer.Streaming where
+module Lightstreamer.Streaming
+    ( StreamInfo(..)
+    , streamConsumer
+    ) where
 
 import Control.Monad (forM_)
 import Control.Monad.IO.Class (liftIO)
 
 import Data.Attoparsec.ByteString (Parser, parseOnly, many', string, takeTill)
-import Data.Attoparsec.ByteString.Char8 (eitherP, endOfLine, isEndOfLine
+import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine
                                         , decimal, double, option)
 import Data.ByteString (ByteString)
 import Data.Conduit (Consumer, await)
 import Data.Functor ((<$>))
-
-import Lightstreamer.Error
 
 data StreamInfo = StreamInfo
     { controlLink :: Maybe ByteString
@@ -23,10 +24,6 @@ data StreamInfo = StreamInfo
     , serverName :: Maybe ByteString
     , sessionId :: !ByteString
     } deriving Show
-
-data StreamConnection = StreamConnection
-    { streamInfo :: StreamInfo
-    }
 
 streamConsumer :: Consumer [ByteString] IO () 
 streamConsumer = 

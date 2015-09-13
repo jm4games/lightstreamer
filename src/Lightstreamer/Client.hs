@@ -2,26 +2,22 @@
 
 module Lightstreamer.Client where
 
-import Control.Monad.IO.Class (liftIO)
+import Control.Concurrent.Async (Async, cancel)
 import Control.Monad.Trans.State.Lazy (evalState, modify, get)
 
-import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine, decimal, double)
-import Data.Conduit (await)
-import Data.Functor ((<$>))
+import Data.ByteString.Char8 (pack)
 
 import Lightstreamer.Error (LsError(..), errorParser)
 import Lightstreamer.Http
 import Lightstreamer.Streaming
 
-import Network.HTTP.Base (RequestMethod(POST), Response(..), Request(rqHeaders, rqBody)
+import Network.HTTP.Base (RequestMethod(POST), Request(rqHeaders)
                          , defaultNormalizeRequestOptions, mkRequest, normalizeRequest)
 import Network.HTTP.Headers (HeaderName(HdrHost), mkHeader)
 import Network.URI (URI(..))
 
 import qualified Data.Attoparsec.ByteString as AB
 import qualified Data.ByteString as BS
-
-import qualified Network.Socket as S
 
 data StreamRequest = StreamRequest
     { srAdapterSet :: String 
@@ -42,6 +38,11 @@ data PollingMode = PollingMode
     , pollingMillis :: Int
     }
 
+data StreamConnection = StreamConnection
+    { httpConnection :: HttpConnection
+    , streamAsync :: Async ()
+    }
+
 defaultStreamRequest :: String -> String -> Int -> StreamRequest
 defaultStreamRequest adapter host port = StreamRequest
     { srAdapterSet = adapter
@@ -55,7 +56,9 @@ defaultStreamRequest adapter host port = StreamRequest
     , srUser = Nothing 
     }
 
-newStreamConnection :: StreamRequest -> IO (Either LsError ())
+-- TODO: use try catch on HTTP invokes and translate to LsError
+
+newStreamConnection :: StreamRequest -> IO (Either LsError StreamConnection)
 newStreamConnection req = do 
     result <- newHttpConnection (srHost req) (srPort req)
     case result of
@@ -67,18 +70,17 @@ newStreamConnection req = do
           Left err -> retConnErr err
           Right res ->
             if resStatusCode res /= 200 then
-                (print $ BS.concat ["Error: ", resReason res]) >> (return $ Right ())
+               return . Left $ HttpError (resReason res) 
             else
                 case resBody res of
-                  ContentBody b -> do
-                   print res
-                   putStrLn "Body:"
-                   print b
-                   print $ AB.parseOnly errorParser b
-                   return $ Right ()
-                  StreamingBody _ ->
-                    (return $ Right ())
-                  _ -> putStrLn "No Body." >> (return $ Right ())
+                  ContentBody b -> 
+                    return . Left . either (HttpError . pack) id $ AB.parseOnly errorParser b
+                  StreamingBody a ->
+                    return . Right $ StreamConnection
+                        { httpConnection = conn
+                        , streamAsync = a
+                        } 
+                  _ -> return . Left $ HttpError "Unexpected response." 
     where 
         headers = [mkHeader HdrHost $ srHost req]
         request = normalizeRequest defaultNormalizeRequestOptions $ 
@@ -109,6 +111,11 @@ buildStreamQueryString sr = flip evalState initial $ do
         initial = "&LS_op2=create&LS_cid=mgQkwtwdysogQz2BJ4Ji%20kOj2Bg&LS_adapter_set=" ++ srAdapterSet sr 
         append val = modify (\s -> val ++ s)
         appendM f = maybe (return ()) (append . f)
+
+closeStreamConnection :: StreamConnection -> IO ()
+closeStreamConnection (StreamConnection { httpConnection = conn, streamAsync = a }) = do
+    cancel a
+    closeHttpConnection conn
 
 data BindRequest = BindRequest
     { brConnectionMode :: Either KeepAliveMode PollingMode

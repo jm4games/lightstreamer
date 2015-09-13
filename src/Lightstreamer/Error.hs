@@ -6,7 +6,10 @@ import Data.Attoparsec.ByteString (Parser, string, takeTill)
 import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine, decimal)
 import Data.ByteString (ByteString)
 
-data LsError = LsError Int ByteString | ConnectionError ByteString deriving Show
+data LsError = LsError Int ByteString 
+             | ConnectionError ByteString 
+             | HttpError ByteString
+             deriving Show
 
 errorParser :: Parser LsError
 errorParser = do

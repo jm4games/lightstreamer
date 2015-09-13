@@ -25,6 +25,7 @@ library
 
   -- other-extensions:    
   build-depends:
+    async             >= 2.0    && < 2.1,
     attoparsec        >= 0.13   && < 13.1,
     base              >= 4.7    && < 4.8,
     bytestring        >= 0.10   && < 0.11,

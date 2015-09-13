@@ -13,14 +13,14 @@ module Lightstreamer.Http
         , resReason
         , resStatusCode
         )
+    , closeHttpConnection
     , newHttpConnection
     , readStreamedResponse
     , sendHttpRequest
     ) where
 
-import Control.Concurrent (ThreadId, forkIO)
+import Control.Concurrent.Async (Async, async)
 import Control.Exception (Exception, throwIO)
-import Control.Monad (unless)
 import Control.Monad.IO.Class (MonadIO(..))
 
 import Data.ByteString.Char8 (readInt)
@@ -32,11 +32,9 @@ import Data.Functor ((<$>))
 import Data.List (find)
 import Data.Typeable (Typeable)
 
-import Debug.Trace (trace)
-
 import Network.BufferType (buf_fromStr, bufferOps)
 import Network.HTTP.Base (Request(rqBody))
-import Network.TCP (HandleStream, socketConnection, writeBlock)
+import Network.TCP (HandleStream, close, socketConnection, writeBlock)
 
 import qualified Data.ByteString as B
 import qualified Data.Conduit.Binary as CB
@@ -55,14 +53,14 @@ instance Exception HttpException where
     
 data HttpHeader = HttpHeader B.ByteString B.ByteString deriving Show
 
-data HttpBody = StreamingBody ThreadId | ContentBody B.ByteString | None deriving Show
+data HttpBody = StreamingBody (Async ()) | ContentBody B.ByteString | None
 
 data HttpResponse = HttpResponse
     { resBody :: HttpBody 
     , resHeaders :: [HttpHeader]
     , resReason :: B.ByteString
     , resStatusCode :: Int
-    } deriving Show
+    }
 
 newHttpConnection :: String -> Int -> IO (Either B.ByteString HttpConnection)
 newHttpConnection host port = do
@@ -74,6 +72,11 @@ newHttpConnection host port = do
           S.connect sock (S.addrAddress a)
           Right . flip HttpConnection sock <$> socketConnection host port sock
     where addrInfo = S.defaultHints { S.addrFamily = S.AF_UNSPEC, S.addrSocketType = S.Stream }
+
+closeHttpConnection :: HttpConnection -> IO ()
+closeHttpConnection (HttpConnection { connection = conn, socket = sock }) = do
+    close conn
+    S.close sock
 
 sendHttpRequest :: HttpConnection -> Request B.ByteString -> IO ()
 sendHttpRequest (HttpConnection { connection = conn }) req = do
@@ -89,18 +92,15 @@ readStreamedResponse :: HttpConnection
                      -> IO (Either B.ByteString HttpResponse)
 readStreamedResponse conn streamSink = do 
     (rSrc, res) <- httpConnectionProducer conn $$+ readHttpHeader
-    --putStrLn "Response:"
-    --print res
     case find contentHeader $ resHeaders res of
       Just (HttpHeader "Content-Length" val) -> do
         body <- rSrc $$+- (CB.take . maybe 0 fst $ readInt val)
         return $ Right res { resBody = ContentBody $ toStrict body } 
       
       Just (HttpHeader "Transfer-Encoding" _) -> do
-        tId <- forkIO (rSrc $=+ chunkConduit B.empty $$+- streamSink)
-        return $ Right res { resBody = StreamingBody tId }
-      _ -> 
-        throwIO $ HttpException "Could not determine body type of response."
+        a <- async (rSrc $=+ chunkConduit B.empty $$+- streamSink)
+        return $ Right res { resBody = StreamingBody a }
+      _ -> throwHttpException "Could not determine body type of response."
                 
     where
         contentHeader (HttpHeader "Content-Length" _) = True
@@ -115,8 +115,8 @@ readHttpHeader = loop [] Nothing
         complete [rest] (Just res) = do
             leftover rest
             return res
-        complete _ (Just _) = liftIO . throwIO $ HttpException "Unexpected response."
-        complete _ Nothing = liftIO . throwIO $ HttpException "No response provided."
+        complete _ (Just _) = throwHttpException "Unexpected response."
+        complete _ Nothing = throwHttpException "No response provided."
         
         -- builds header collection
         -- @acc - collection of partial buffers that will be combined upon a new line char
@@ -129,7 +129,7 @@ readHttpHeader = loop [] Nothing
                 | B.null p1 -> complete [B.drop 1 rest] res
                 | otherwise -> 
                   case parse (B.concat . reverse $ p1:acc) res of
-                    Left err -> liftIO . throwIO $ HttpException err 
+                    Left err -> throwHttpException err 
                     Right res' -> build [] res' $ B.drop 1 rest -- drop 1 = \n
 
               Nothing -> loop (p1:acc) res
@@ -150,6 +150,9 @@ readHttpHeader = loop [] Nothing
                                  in HttpHeader name (B.dropWhile (==W._space) $ B.drop 1 value) 
                     in Right $ Just a { resHeaders = header : resHeaders a } 
 
+throwHttpException :: MonadIO m => B.ByteString -> m a
+throwHttpException = liftIO . throwIO . HttpException
+
 chunkConduit :: B.ByteString -> Conduit B.ByteString IO [B.ByteString]
 chunkConduit partial = await >>= maybe (return ()) build
     where
@@ -158,7 +161,7 @@ chunkConduit partial = await >>= maybe (return ()) build
             | otherwise = yieldChunks
         yieldChunks bytes =
             case readChunks bytes of
-              Left err -> liftIO . throwIO $ HttpException err 
+              Left err -> throwHttpException err 
               Right (chunks, rest) -> do
                 yield chunks
                 chunkConduit rest
@@ -170,7 +173,7 @@ readChunks = loop []
             | buf == B.empty = retRight acc B.empty
             | otherwise = 
                  if p1 == B.empty then Left "Invalid chunk stream."
-                 else case octToDec p1 of
+                 else case hexToDec p1 of
                         Left err -> Left err
                         Right 0 -> retRight acc B.empty
                         Right size -> 
@@ -180,5 +183,4 @@ readChunks = loop []
                           else retRight acc buf 
                 where (p1, p2) = B.breakByte W._cr buf
         retRight acc rest = Right (reverse acc, rest)
-        octToDec = 
-            maybe (Left "Invalid hexidecimal number.") (Right . fst) . readHexadecimal
+        hexToDec = maybe (Left "Invalid hexidecimal number.") (Right . fst) . readHexadecimal
