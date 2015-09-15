@@ -58,14 +58,17 @@ defaultStreamRequest adapter host port = StreamRequest
 
 -- TODO: use try catch on HTTP invokes and translate to LsError
 
-newStreamConnection :: StreamRequest -> IO (Either LsError StreamConnection)
-newStreamConnection req = do 
+newStreamConnection :: StreamHandler h
+                    => StreamRequest
+                    -> h 
+                    -> IO (Either LsError StreamConnection)
+newStreamConnection req handler = do 
     result <- newHttpConnection (srHost req) (srPort req)
     case result of
       Left err -> retConnErr err
       Right conn -> do
         sendHttpRequest conn request
-        response <- readStreamedResponse conn streamConsumer 
+        response <- readStreamedResponse conn $ streamConsumer handler
         case response of
           Left err -> retConnErr err
           Right res ->

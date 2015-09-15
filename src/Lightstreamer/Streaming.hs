@@ -1,11 +1,11 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, RankNTypes #-}
 
 module Lightstreamer.Streaming
     ( StreamInfo(..)
+    , StreamHandler(..)
     , streamConsumer
     ) where
 
-import Control.Monad (forM_)
 import Control.Monad.IO.Class (liftIO)
 
 import Data.Attoparsec.ByteString (Parser, parseOnly, many', string, takeTill)
@@ -25,19 +25,31 @@ data StreamInfo = StreamInfo
     , sessionId :: !ByteString
     } deriving Show
 
-streamConsumer :: Consumer [ByteString] IO () 
-streamConsumer = 
+class StreamHandler h where 
+    streamClosed :: h -> IO ()
+    streamClosed _ = return ()
+
+    streamCorrupt :: h -> String -> IO ()
+    streamCorrupt _ _ = return ()
+
+    streamData :: h -> [ByteString] -> IO ()
+    
+    streamOpened :: h -> StreamInfo -> IO ()
+    streamOpened _ _ = return ()
+
+streamConsumer :: StreamHandler h => h -> Consumer [ByteString] IO () 
+streamConsumer handler = 
     await >>= maybe (liftIO $ putStrLn "No initial stream input ") consumeInfo
     where
-        consumeInfo [] = streamConsumer
-        consumeInfo (x:xs) = do
-            let info = parseOnly streamInfoParser x
-            liftIO $ putStrLn "Stream Info:"
-            liftIO $ print info
-            consumeValues xs
+        consumeInfo [] = streamConsumer handler
+        consumeInfo (x:xs) =
+            either 
+                (liftIO . streamCorrupt handler) 
+                (\i -> liftIO (streamOpened handler i) >> consumeValues xs)
+                (parseOnly streamInfoParser x)
         loopConsume = await >>= maybe (return ()) consumeValues
         consumeValues [] = loopConsume 
-        consumeValues values = liftIO (forM_ values print) >> loopConsume
+        consumeValues values = liftIO (streamData handler values) >> loopConsume
 
 streamInfoParser :: Parser StreamInfo
 streamInfoParser = do

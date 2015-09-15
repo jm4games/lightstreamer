@@ -18,8 +18,10 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     
-    Lightstreamer.Client
+    Lightstreamer
   other-modules:       
+    Lightstreamer.Client
+    Lightstreamer.Error
     Lightstreamer.Http
     Lightstreamer.Streaming
 
