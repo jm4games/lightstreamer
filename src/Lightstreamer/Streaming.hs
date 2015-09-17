@@ -29,8 +29,8 @@ class StreamHandler h where
     streamClosed :: h -> IO ()
     streamClosed _ = return ()
 
-    streamCorrupt :: h -> String -> IO ()
-    streamCorrupt _ _ = return ()
+    streamCorrupted :: h -> String -> IO ()
+    streamCorrupted _ _ = return ()
 
     streamData :: h -> [ByteString] -> IO ()
     
@@ -44,7 +44,7 @@ streamConsumer handler =
         consumeInfo [] = streamConsumer handler
         consumeInfo (x:xs) =
             either 
-                (liftIO . streamCorrupt handler) 
+                (liftIO . streamCorrupted handler) 
                 (\i -> liftIO (streamOpened handler i) >> consumeValues xs)
                 (parseOnly streamInfoParser x)
         loopConsume = await >>= maybe (return ()) consumeValues

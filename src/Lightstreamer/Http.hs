@@ -19,8 +19,8 @@ module Lightstreamer.Http
     , sendHttpRequest
     ) where
 
-import Control.Concurrent.Async (Async, async)
-import Control.Exception (Exception, throwIO)
+import Control.Concurrent (ThreadId, forkIO)
+import Control.Exception (SomeException, Exception, throwIO, try)
 import Control.Monad.IO.Class (MonadIO(..))
 
 import Data.ByteString.Char8 (readInt)
@@ -32,19 +32,17 @@ import Data.Functor ((<$>))
 import Data.List (find)
 import Data.Typeable (Typeable)
 
-import Network.BufferType (buf_fromStr, bufferOps)
-import Network.HTTP.Base (Request(rqBody))
-import Network.TCP (HandleStream, close, socketConnection, writeBlock)
-
 import qualified Data.ByteString as B
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Word8 as W
 
 import qualified Network.Socket as S
+import qualified Network.Socket.ByteString as SB
 
-data HttpConnection = HttpConnection
-    { connection :: HandleStream B.ByteString
-    , socket :: S.Socket
+data Connection = Connection
+    { closeConnection :: IO ()
+    , readBytes :: IO ByteString
+    , writeBytes :: ByteString -> IO Int
     } 
 
 data HttpException = HttpException B.ByteString deriving (Show, Typeable)
@@ -53,7 +51,7 @@ instance Exception HttpException where
     
 data HttpHeader = HttpHeader B.ByteString B.ByteString deriving Show
 
-data HttpBody = StreamingBody (Async ()) | ContentBody B.ByteString | None
+data HttpBody = StreamingBody ThreadId | ContentBody B.ByteString | None
 
 data HttpResponse = HttpResponse
     { resBody :: HttpBody 
@@ -62,35 +60,32 @@ data HttpResponse = HttpResponse
     , resStatusCode :: Int
     }
 
-newHttpConnection :: String -> Int -> IO (Either B.ByteString HttpConnection)
+newHttpConnection :: String -> Int -> IO Connection 
 newHttpConnection host port = do
-    addrInfos <- S.getAddrInfo (Just addrInfo) (Just host) (Just $ show port)
-    case addrInfos of
-      [] -> return $ Left "Failed to get host address information"
-      (a:_) -> do
-          sock <- S.socket (S.addrFamily a) S.Stream S.defaultProtocol
-          S.connect sock (S.addrAddress a)
-          Right . flip HttpConnection sock <$> socketConnection host port sock
-    where addrInfo = S.defaultHints { S.addrFamily = S.AF_UNSPEC, S.addrSocketType = S.Stream }
+    addr <- S.inet_addr host
+    let sockAddr = S.SocketAddrInet port addr
+    sock <- S.socket S.AF_INET S.Stream 6 --6 = tcp 
+    S.connect sock sockaddr
+    return Connection
+        { closeConnection = S.close sock
+        , readBytes = SB.receive sock 8192
+        , writeBytes = SB.send sock 
+        }
 
-closeHttpConnection :: HttpConnection -> IO ()
-closeHttpConnection (HttpConnection { connection = conn, socket = sock }) = do
-    close conn
-    S.close sock
+closeHttpConnection :: Connection -> IO ()
+closeHttpConnection = closeConnection 
 
-sendHttpRequest :: HttpConnection -> Request B.ByteString -> IO ()
-sendHttpRequest (HttpConnection { connection = conn }) req = do
-    _ <- writeBlock conn (buf_fromStr bufferOps $ show req)
-    _ <- writeBlock conn (rqBody req)
-    return ()
+sendHttpRequest :: Connection -> Request B.ByteString -> IO ()
+sendHttpRequest conn req = undefined 
 
-httpConnectionProducer :: HttpConnection -> Producer IO B.ByteString
-httpConnectionProducer (HttpConnection { socket = sock }) = sourceSocket sock
+httpConnectionProducer :: S.Socket -> Producer IO B.ByteString
+httpConnectionProducer sock = sourceSocket sock
 
 readStreamedResponse :: HttpConnection 
+                     -> (String -> IO ())
                      -> Consumer [B.ByteString] IO () 
                      -> IO (Either B.ByteString HttpResponse)
-readStreamedResponse conn streamSink = do 
+readStreamedResponse conn errHandle streamSink = do 
     (rSrc, res) <- httpConnectionProducer conn $$+ readHttpHeader
     case find contentHeader $ resHeaders res of
       Just (HttpHeader "Content-Length" val) -> do
@@ -98,7 +93,8 @@ readStreamedResponse conn streamSink = do
         return $ Right res { resBody = ContentBody $ toStrict body } 
       
       Just (HttpHeader "Transfer-Encoding" _) -> do
-        a <- async (rSrc $=+ chunkConduit B.empty $$+- streamSink)
+        a <- forkIO $ try (rSrc $=+ chunkConduit B.empty $$+- streamSink) >>=
+                        either (\e -> (errHandle $ (show :: SomeException -> String)e)) return
         return $ Right res { resBody = StreamingBody a }
       _ -> throwHttpException "Could not determine body type of response."
                 

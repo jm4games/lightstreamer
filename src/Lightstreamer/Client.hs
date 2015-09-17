@@ -2,7 +2,6 @@
 
 module Lightstreamer.Client where
 
-import Control.Concurrent.Async (Async, cancel)
 import Control.Monad.Trans.State.Lazy (evalState, modify, get)
 
 import Data.ByteString.Char8 (pack)
@@ -40,7 +39,6 @@ data PollingMode = PollingMode
 
 data StreamConnection = StreamConnection
     { httpConnection :: HttpConnection
-    , streamAsync :: Async ()
     }
 
 defaultStreamRequest :: String -> String -> Int -> StreamRequest
@@ -68,7 +66,7 @@ newStreamConnection req handler = do
       Left err -> retConnErr err
       Right conn -> do
         sendHttpRequest conn request
-        response <- readStreamedResponse conn $ streamConsumer handler
+        response <- readStreamedResponse conn (streamCorrupted handler) $ streamConsumer handler
         case response of
           Left err -> retConnErr err
           Right res ->
@@ -78,10 +76,9 @@ newStreamConnection req handler = do
                 case resBody res of
                   ContentBody b -> 
                     return . Left . either (HttpError . pack) id $ AB.parseOnly errorParser b
-                  StreamingBody a ->
+                  StreamingBody _ ->
                     return . Right $ StreamConnection
                         { httpConnection = conn
-                        , streamAsync = a
                         } 
                   _ -> return . Left $ HttpError "Unexpected response." 
     where 
@@ -116,8 +113,7 @@ buildStreamQueryString sr = flip evalState initial $ do
         appendM f = maybe (return ()) (append . f)
 
 closeStreamConnection :: StreamConnection -> IO ()
-closeStreamConnection (StreamConnection { httpConnection = conn, streamAsync = a }) = do
-    cancel a
+closeStreamConnection (StreamConnection { httpConnection = conn }) =
     closeHttpConnection conn
 
 data BindRequest = BindRequest
