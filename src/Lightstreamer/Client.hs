@@ -8,37 +8,16 @@ import Data.ByteString.Char8 (pack)
 
 import Lightstreamer.Error (LsError(..), errorParser)
 import Lightstreamer.Http
+import Lightstreamer.Request
 import Lightstreamer.Streaming
 
-import Network.HTTP.Base (RequestMethod(POST), Request(rqHeaders)
-                         , defaultNormalizeRequestOptions, mkRequest, normalizeRequest)
-import Network.HTTP.Headers (HeaderName(HdrHost), mkHeader)
 import Network.URI (URI(..))
 
 import qualified Data.Attoparsec.ByteString as AB
 import qualified Data.ByteString as BS
 
-data StreamRequest = StreamRequest
-    { srAdapterSet :: String 
-    , srConnectionMode :: Either KeepAliveMode PollingMode
-    , srContentLength :: Maybe Int
-    , srHost :: String 
-    , srPassword :: Maybe String 
-    , srPort :: Int
-    , srRequestedMaxBandwidth :: Maybe Double
-    , srReportInfo :: Maybe Bool
-    , srUser ::  Maybe String 
-    }
-
-data KeepAliveMode = KeepAliveMode Int
-
-data PollingMode = PollingMode
-    { idelMillis :: Maybe Int
-    , pollingMillis :: Int
-    }
-
 data StreamConnection = StreamConnection
-    { httpConnection :: HttpConnection
+    { httpConnection :: Connection
     }
 
 defaultStreamRequest :: String -> String -> Int -> StreamRequest
