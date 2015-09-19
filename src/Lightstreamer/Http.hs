@@ -20,7 +20,7 @@ module Lightstreamer.Http
     ) where
 
 import Control.Concurrent (ThreadId, forkIO)
-import Control.Exception (SomeException, Exception, throwIO, try)
+import Control.Exception (Exception, throwIO, try)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (MonadIO(..))
 
@@ -31,7 +31,9 @@ import Data.Conduit (Consumer, Conduit, Producer, ($$+), ($$+-), ($=+), await, l
 import Data.List (find)
 import Data.Typeable (Typeable)
 
-import Lightstreamer.Request (HttpRequest, serializeHttpRequest)
+import Lightstreamer.Error (showException)
+import Lightstreamer.Request (RequestConverter(..), StandardHeaders
+                             , createStandardHeaders, serializeHttpRequest)
 
 import qualified Data.ByteString as B
 import qualified Data.Conduit.Binary as CB
@@ -43,6 +45,7 @@ import qualified Network.Socket.ByteString as SB
 data Connection = Connection
     { closeConnection :: IO ()
     , readBytes :: IO B.ByteString
+    , standardHeaders :: StandardHeaders
     , writeBytes :: B.ByteString -> IO ()
     } 
 
@@ -71,14 +74,16 @@ newHttpConnection host port = do
     return Connection
         { closeConnection = S.close sock
         , readBytes = SB.recv sock 8192
+        , standardHeaders = createStandardHeaders host
         , writeBytes = SB.sendAll sock 
         }
 
 closeHttpConnection :: Connection -> IO ()
 closeHttpConnection = closeConnection 
 
-sendHttpRequest :: Connection -> HttpRequest -> IO ()
-sendHttpRequest conn req = writeBytes conn $ serializeHttpRequest req
+sendHttpRequest :: RequestConverter r => Connection -> r -> IO ()
+sendHttpRequest conn req = writeBytes conn . serializeHttpRequest $ 
+                            convertToHttp req (standardHeaders conn)
 
 connectionProducer :: Connection -> Producer IO B.ByteString
 connectionProducer conn = loop
@@ -87,7 +92,7 @@ connectionProducer conn = loop
             unless (B.null bytes) $ yield bytes >> loop 
         
 readStreamedResponse :: Connection 
-                     -> (String -> IO ())
+                     -> (B.ByteString -> IO ())
                      -> Consumer [B.ByteString] IO () 
                      -> IO (Either B.ByteString HttpResponse)
 readStreamedResponse conn errHandle streamSink = do 
@@ -99,7 +104,7 @@ readStreamedResponse conn errHandle streamSink = do
       
       Just (HttpHeader "Transfer-Encoding" _) -> do
         a <- forkIO $ try (rSrc $=+ chunkConduit B.empty $$+- streamSink) >>=
-                        either (errHandle . (show :: SomeException -> String)) return
+                        either (errHandle . showException) return
         return $ Right res { resBody = StreamingBody a }
       _ -> throwHttpException "Could not determine body type of response."
                 

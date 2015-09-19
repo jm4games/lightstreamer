@@ -24,6 +24,7 @@ library
     Lightstreamer.Client
     Lightstreamer.Error
     Lightstreamer.Http
+    Lightstreamer.Request
     Lightstreamer.Streaming
 
   -- other-extensions:    

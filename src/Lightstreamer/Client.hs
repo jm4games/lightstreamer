@@ -2,16 +2,14 @@
 
 module Lightstreamer.Client where
 
-import Control.Monad.Trans.State.Lazy (evalState, modify, get)
+import Control.Exception (try)
 
-import Data.ByteString.Char8 (pack)
+import Data.ByteString.Char8 (pack, unpack)
 
-import Lightstreamer.Error (LsError(..), errorParser)
+import Lightstreamer.Error (LsError(..), errorParser, showException)
 import Lightstreamer.Http
 import Lightstreamer.Request
 import Lightstreamer.Streaming
-
-import Network.URI (URI(..))
 
 import qualified Data.Attoparsec.ByteString as AB
 import qualified Data.ByteString as BS
@@ -40,13 +38,12 @@ newStreamConnection :: StreamHandler h
                     -> h 
                     -> IO (Either LsError StreamConnection)
 newStreamConnection req handler = do 
-    result <- newHttpConnection (srHost req) (srPort req)
-    case result of
-      Left err -> retConnErr err
-      Right conn -> do
-        sendHttpRequest conn request
-        response <- readStreamedResponse conn (streamCorrupted handler) $ streamConsumer handler
-        case response of
+    result <- try $ do
+      conn <- newHttpConnection (srHost req) (srPort req)
+      sendHttpRequest conn req 
+      response <- readStreamedResponse conn (streamCorrupted handler . unpack) $ 
+                    streamConsumer handler
+      case response of
           Left err -> retConnErr err
           Right res ->
             if resStatusCode res /= 200 then
@@ -59,37 +56,12 @@ newStreamConnection req handler = do
                     return . Right $ StreamConnection
                         { httpConnection = conn
                         } 
-                  _ -> return . Left $ HttpError "Unexpected response." 
+                  _ -> return . Left $ HttpError "Unexpected response."
+    case result of
+      Left err -> retConnErr $ showException err
+      Right x -> return x 
     where 
-        headers = [mkHeader HdrHost $ srHost req]
-        request = normalizeRequest defaultNormalizeRequestOptions $ 
-                    (mkRequest POST reqUri) { rqHeaders = headers }
-        reqUri = URI
-            { uriScheme = ""
-            , uriAuthority = Nothing
-            , uriPath = "/lightstreamer/create_session.txt"
-            , uriQuery = buildStreamQueryString req 
-            , uriFragment = ""
-            }
         retConnErr = return . Left . ConnectionError
-
-buildStreamQueryString :: StreamRequest -> String
-buildStreamQueryString sr = flip evalState initial $ do
-    appendM ("&LS_user=" ++) $ srUser sr
-    appendM ("&LS_password=" ++) $ srPassword sr
-    case srConnectionMode sr of
-      Left (KeepAliveMode x) -> append $ "&LS_keepalive_millis=" ++ show x
-      Right y -> append $ "&LS_polling=true&LS_polling_millis=" ++ show (pollingMillis y) ++
-                          "&LS_idle_millis" ++ show (idelMillis y)
-    appendM ((++) "&LS_content_length" . show) $ srContentLength sr
-    appendM ((++) "&LS_report_info" . show) $ srReportInfo sr
-    appendM ((++) "&LS_requested_max_bandwith=" . show) $ srRequestedMaxBandwidth sr
-    append "?"
-    get
-    where
-        initial = "&LS_op2=create&LS_cid=mgQkwtwdysogQz2BJ4Ji%20kOj2Bg&LS_adapter_set=" ++ srAdapterSet sr 
-        append val = modify (\s -> val ++ s)
-        appendM f = maybe (return ()) (append . f)
 
 closeStreamConnection :: StreamConnection -> IO ()
 closeStreamConnection (StreamConnection { httpConnection = conn }) =
