@@ -3,7 +3,8 @@
 {-# LANGUAGE RankNTypes #-}
 
 module Lightstreamer.Http
-    ( Connection
+    ( Connection(closeConnection)
+    , ConnectionSettings(..)
     , HttpBody(..)
     , HttpException(..)
     , HttpHeader(..)
@@ -13,10 +14,10 @@ module Lightstreamer.Http
         , resReason
         , resStatusCode
         )
-    , closeHttpConnection
-    , newHttpConnection
+    , newConnection
     , readStreamedResponse
     , sendHttpRequest
+    , simpleHttpRequest
     ) where
 
 import Control.Concurrent (ThreadId, forkIO)
@@ -42,6 +43,11 @@ import qualified Data.Word8 as W
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
 
+data ConnectionSettings = ConnectionSettings
+    { csHost :: String
+    , csPort :: Int
+    }
+
 data Connection = Connection
     { closeConnection :: IO ()
     , readBytes :: IO B.ByteString
@@ -64,22 +70,19 @@ data HttpResponse = HttpResponse
     , resStatusCode :: Int
     }
 
-newHttpConnection :: String -> Int -> IO Connection 
-newHttpConnection host port = do
-    addr <- S.inet_addr host
-    let sockAddr = S.SockAddrInet (fromInteger $ toInteger port) addr
+newConnection :: ConnectionSettings -> IO Connection 
+newConnection settings = do
+    addr <- S.inet_addr (csHost settings)
+    let sockAddr = S.SockAddrInet (fromInteger . toInteger $ csPort settings) addr
     sock <- S.socket S.AF_INET S.Stream 6 --6 = tcp 
     S.setSocketOption sock S.NoDelay 1
     S.connect sock sockAddr
     return Connection
         { closeConnection = S.close sock
         , readBytes = SB.recv sock 8192
-        , standardHeaders = createStandardHeaders host
+        , standardHeaders = createStandardHeaders $ csHost settings 
         , writeBytes = SB.sendAll sock 
         }
-
-closeHttpConnection :: Connection -> IO ()
-closeHttpConnection = closeConnection 
 
 sendHttpRequest :: RequestConverter r => Connection -> r -> IO ()
 sendHttpRequest conn req = writeBytes conn . serializeHttpRequest $ 
@@ -111,6 +114,20 @@ readStreamedResponse conn errHandle streamSink = do
     where
         contentHeader (HttpHeader "Content-Length" _) = True
         contentHeader (HttpHeader "Transfer-Encoding" _) = True
+        contentHeader _ = False
+
+simpleHttpRequest :: RequestConverter r => Connection -> r -> IO (Either B.ByteString HttpResponse)
+simpleHttpRequest conn req = do
+    sendHttpRequest conn req
+    (rSrc, res) <- connectionProducer conn $$+ readHttpHeader
+    case find contentHeader $ resHeaders res of
+      Just (HttpHeader "Content-Length" val) -> do
+        body <- rSrc $$+- (CB.take . maybe 0 fst $ readInt val)
+        return $ Right res { resBody = ContentBody $ toStrict body } 
+
+      _ -> throwHttpException "Unexpected response body."
+    where 
+        contentHeader (HttpHeader "Content-Length" _) = True
         contentHeader _ = False
 
 readHttpHeader :: Consumer B.ByteString IO HttpResponse

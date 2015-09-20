@@ -18,54 +18,41 @@ data StreamConnection = StreamConnection
     { httpConnection :: Connection
     }
 
-defaultStreamRequest :: String -> String -> Int -> StreamRequest
-defaultStreamRequest adapter host port = StreamRequest
-    { srAdapterSet = adapter
-    , srConnectionMode = Left $ KeepAliveMode 600
-    , srContentLength = Nothing
-    , srHost = host
-    , srPassword = Nothing
-    , srPort = port
-    , srRequestedMaxBandwidth = Nothing
-    , srReportInfo = Nothing
-    , srUser = Nothing 
-    }
-
 -- TODO: use try catch on HTTP invokes and translate to LsError
 
 newStreamConnection :: StreamHandler h
-                    => StreamRequest
+                    => ConnectionSettings
+                    -> StreamRequest
                     -> h 
                     -> IO (Either LsError StreamConnection)
-newStreamConnection req handler = do 
-    result <- try $ do
-      conn <- newHttpConnection (srHost req) (srPort req)
-      sendHttpRequest conn req 
-      response <- readStreamedResponse conn (streamCorrupted handler . unpack) $ 
-                    streamConsumer handler
-      case response of
-          Left err -> retConnErr err
-          Right res ->
-            if resStatusCode res /= 200 then
-               return . Left $ HttpError (resReason res) 
-            else
-                case resBody res of
-                  ContentBody b -> 
-                    return . Left . either (HttpError . pack) id $ AB.parseOnly errorParser b
-                  StreamingBody _ ->
-                    return . Right $ StreamConnection
-                        { httpConnection = conn
-                        } 
-                  _ -> return . Left $ HttpError "Unexpected response."
-    case result of
-      Left err -> retConnErr $ showException err
-      Right x -> return x 
+newStreamConnection settings req handler = doHttpRequest $ do 
+    conn <- newConnection settings 
+    sendHttpRequest conn req 
+    response <- readStreamedResponse conn (streamCorrupted handler . unpack) $ 
+                  streamConsumer handler
+    case response of
+        Left err -> retConnErr err
+        Right res ->
+          if resStatusCode res /= 200 then
+             return . Left $ HttpError (resReason res) 
+          else
+              case resBody res of
+                ContentBody b -> 
+                  return . Left . either (HttpError . pack) id $ AB.parseOnly errorParser b
+                StreamingBody _ ->
+                  return . Right $ StreamConnection
+                      { httpConnection = conn
+                      } 
+                _ -> return . Left $ HttpError "Unexpected response."
     where 
         retConnErr = return . Left . ConnectionError
 
-closeStreamConnection :: StreamConnection -> IO ()
-closeStreamConnection (StreamConnection { httpConnection = conn }) =
-    closeHttpConnection conn
+doHttpRequest :: IO (Either LsError a) -> IO (Either LsError a)
+doHttpRequest action = do
+    result <- try action 
+    case result of
+      Left err -> return . Left . ConnectionError $ showException err
+      Right x -> return x
 
 data BindRequest = BindRequest
     { brConnectionMode :: Either KeepAliveMode PollingMode
@@ -78,38 +65,28 @@ data BindRequest = BindRequest
 bindToSession :: BindRequest -> Either String StreamConnection
 bindToSession = undefined
 
-data ControlRequest = ControlRequest
-    { crSession :: BS.ByteString
-    , crTable :: BS.ByteString
-    , crTableOperation :: TableOperation
-    }
-
-data TableOperation = TableAdd TableInfo 
-                    | TableAddSilent TableInfo 
-                    | TableStart TableInfo
-                    | TableDelete
-
-data TableInfo = TableInfo
-    { tiDataAdapter :: Maybe BS.ByteString
-    , tiId :: BS.ByteString
-    , tiMode :: SubscriptionMode 
-    , tiRequestedBufferSize :: Maybe Int
-    , tiRequestedMaxFrequency :: Maybe UpdateFrequency
-    , tiSchema :: BS.ByteString
-    , tiSelector :: Maybe BS.ByteString
-    , tiSnapshot :: Maybe Bool 
-    }
-
-data SubscriptionMode = Raw | Merge | Distinct | Command
-
-data UpdateFrequency = Unfiltered | Frequency Double
-
 data ControlConnection = ControlConnection
 
 data OK = OK
 
-newControlConnection :: ControlRequest -> Either String ControlConnection
-newControlConnection = undefined
+subscribe :: ConnectionSettings -> SubscriptionRequest -> IO (Either LsError OK)
+subscribe settings req = withRequest settings req $ \res ->
+    case resBody res of
+      ContentBody b -> undefined
+      _ -> Left $ HttpError "Unexpected response."
+
+withRequest :: RequestConverter r
+            => ConnectionSettings
+            -> r
+            -> (HttpResponse -> Either LsError OK) 
+            -> IO (Either LsError OK)
+withRequest settings req action = do
+    conn <- newConnection settings
+    result <- try $ simpleHttpRequest conn req >>= (return . either (Left . ConnectionError) action)
+    closeConnection conn
+    case result of
+      Left err -> return . Left . ConnectionError $ showException err
+      Right x -> return x
 
 data ReconfigureRequest = ReconfigureRequest
     { rrRequestedMaxFrequency :: Maybe UpdateFrequency
