@@ -3,7 +3,11 @@
 module Lightstreamer.Client where
 
 import Control.Exception (try)
+import Control.Concurrent (ThreadId)
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar)
 
+import Data.Functor ((<$>))
+import Data.Attoparsec.ByteString.Char8 (endOfLine)
 import Data.ByteString.Char8 (pack, unpack)
 
 import Lightstreamer.Error (LsError(..), errorParser, showException)
@@ -14,8 +18,9 @@ import Lightstreamer.Streaming
 import qualified Data.Attoparsec.ByteString as AB
 import qualified Data.ByteString as BS
 
-data StreamConnection = StreamConnection
-    { httpConnection :: Connection
+data StreamContext = StreamContext
+    { info :: StreamInfo
+    , threadId :: ThreadId
     }
 
 -- TODO: use try catch on HTTP invokes and translate to LsError
@@ -24,12 +29,13 @@ newStreamConnection :: StreamHandler h
                     => ConnectionSettings
                     -> StreamRequest
                     -> h 
-                    -> IO (Either LsError StreamConnection)
+                    -> IO (Either LsError StreamContext)
 newStreamConnection settings req handler = doHttpRequest $ do 
     conn <- newConnection settings 
+    varInfo <- newEmptyMVar
     sendHttpRequest conn req 
     response <- readStreamedResponse conn (streamCorrupted handler . unpack) $ 
-                  streamConsumer handler
+                  streamConsumer varInfo handler
     case response of
         Left err -> retConnErr err
         Right res ->
@@ -39,10 +45,9 @@ newStreamConnection settings req handler = doHttpRequest $ do
               case resBody res of
                 ContentBody b -> 
                   return . Left . either (HttpError . pack) id $ AB.parseOnly errorParser b
-                StreamingBody _ ->
-                  return . Right $ StreamConnection
-                      { httpConnection = conn
-                      } 
+                StreamingBody tId -> do
+                  valInfo <- takeMVar varInfo
+                  return . Right $ StreamContext valInfo tId
                 _ -> return . Left $ HttpError "Unexpected response."
     where 
         retConnErr = return . Left . ConnectionError
@@ -62,7 +67,7 @@ data BindRequest = BindRequest
     , brSession :: BS.ByteString
     }
 
-bindToSession :: BindRequest -> Either String StreamConnection
+bindToSession :: BindRequest -> Either String StreamContext
 bindToSession = undefined
 
 data ControlConnection = ControlConnection
@@ -72,7 +77,7 @@ data OK = OK
 subscribe :: ConnectionSettings -> SubscriptionRequest -> IO (Either LsError OK)
 subscribe settings req = withRequest settings req $ \res ->
     case resBody res of
-      ContentBody b -> undefined
+      ContentBody b -> parseSimpleResponse b 
       _ -> Left $ HttpError "Unexpected response."
 
 withRequest :: RequestConverter r
@@ -82,11 +87,20 @@ withRequest :: RequestConverter r
             -> IO (Either LsError OK)
 withRequest settings req action = do
     conn <- newConnection settings
-    result <- try $ simpleHttpRequest conn req >>= (return . either (Left . ConnectionError) action)
+    result <- try $ either (Left . ConnectionError) action <$> simpleHttpRequest conn req
     closeConnection conn
     case result of
       Left err -> return . Left . ConnectionError $ showException err
       Right x -> return x
+
+parseSimpleResponse :: BS.ByteString -> Either LsError OK 
+parseSimpleResponse = either (Left . HttpError . pack) id . AB.parseOnly resParser 
+    where 
+        resParser = AB.eitherP errorParser okParser
+        okParser = do
+            _ <- AB.string "OK"
+            endOfLine
+            return OK
 
 data ReconfigureRequest = ReconfigureRequest
     { rrRequestedMaxFrequency :: Maybe UpdateFrequency
@@ -108,5 +122,5 @@ changeConstraints = undefined
 destroyControlConnection :: ControlConnection -> BS.ByteString -> Either String OK
 destroyControlConnection = undefined
 
-sendMessage :: StreamConnection -> BS.ByteString -> BS.ByteString -> Either String OK
+sendMessage :: ConnectionSettings -> BS.ByteString -> BS.ByteString -> Either String OK
 sendMessage = undefined

@@ -15,6 +15,7 @@ module Lightstreamer.Request
     , UpdateFrequency(..)
     , createStandardHeaders
     , defaultStreamRequest
+    , defaultTableInfo
     , serializeHttpRequest
     ) where
 
@@ -144,6 +145,18 @@ defaultStreamRequest adapter = StreamRequest
     , srRequestedMaxBandwidth = Nothing
     , srReportInfo = Nothing
     , srUser = Nothing 
+    }
+
+defaultTableInfo :: B.ByteString -> SubscriptionMode -> B.ByteString -> TableInfo
+defaultTableInfo tableId mode schema = TableInfo
+    { tiDataAdapter = Nothing
+    , tiId = tableId
+    , tiMode = mode
+    , tiRequestedBufferSize = Nothing
+    , tiRequestedMaxFrequency = Nothing
+    , tiSchema = schema
+    , tiSelector = Nothing
+    , tiSnapshot = Nothing
     }
 
 createStandardHeaders :: String -> StandardHeaders

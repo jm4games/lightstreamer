@@ -6,9 +6,10 @@ module Lightstreamer.Streaming
     , streamConsumer
     ) where
 
+import Control.Concurrent.MVar (MVar, putMVar)
 import Control.Monad.IO.Class (liftIO)
 
-import Data.Attoparsec.ByteString (Parser, parseOnly, many', string, takeTill)
+import Data.Attoparsec.ByteString (Parser, parseOnly, skipMany, string, takeTill)
 import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine
                                         , decimal, double, option)
 import Data.ByteString (ByteString)
@@ -19,7 +20,6 @@ data StreamInfo = StreamInfo
     { controlLink :: Maybe ByteString
     , keepAliveInMilli :: !Int
     , maxBandwidth :: !Double
-    , preamble :: [ByteString]
     , requestLimit :: Maybe Int
     , serverName :: Maybe ByteString
     , sessionId :: !ByteString
@@ -37,15 +37,19 @@ class StreamHandler h where
     streamOpened :: h -> StreamInfo -> IO ()
     streamOpened _ _ = return ()
 
-streamConsumer :: StreamHandler h => h -> Consumer [ByteString] IO () 
-streamConsumer handler = 
+-- TODO: handle completion of mvar is stream is corrupted before getting stream info
+
+streamConsumer :: StreamHandler h => MVar StreamInfo -> h -> Consumer [ByteString] IO () 
+streamConsumer varInfo handler = 
     await >>= maybe (liftIO $ putStrLn "No initial stream input ") consumeInfo
     where
-        consumeInfo [] = streamConsumer handler
+        consumeInfo [] = streamConsumer varInfo handler
         consumeInfo (x:xs) =
             either 
                 (liftIO . streamCorrupted handler) 
-                (\i -> liftIO (streamOpened handler i) >> consumeValues xs)
+                (\i -> do
+                   liftIO $ putMVar varInfo i >> streamOpened handler i
+                   consumeValues xs)
                 (parseOnly streamInfoParser x)
         loopConsume = await >>= maybe (return ()) consumeValues
         consumeValues [] = loopConsume 
@@ -61,13 +65,12 @@ streamInfoParser = do
     maxB <- parseDblField "MaxBandwidth:"
     reqLimit <- parseOptional $ parseIntField "RequestLimit:"
     srv <- parseOptional $ parseTxtField "ServerName:"
-    pre <- many' $ parseTxtField "Preamble:"
+    skipMany $ parseTxtField "Preamble:"
     endOfLine
     return StreamInfo
         { controlLink = ctrlLink
         , keepAliveInMilli = keep
         , maxBandwidth = maxB
-        , preamble = pre
         , requestLimit = reqLimit
         , serverName = srv
         , sessionId = sId
