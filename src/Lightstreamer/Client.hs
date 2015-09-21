@@ -40,15 +40,15 @@ newStreamConnection settings req handler = doHttpRequest $ do
         Left err -> retConnErr err
         Right res ->
           if resStatusCode res /= 200 then
-             return . Left $ HttpError (resReason res) 
+             return . Left $ HttpError (resStatusCode res) (resReason res)
           else
               case resBody res of
                 ContentBody b -> 
-                  return . Left . either (HttpError . pack) id $ AB.parseOnly errorParser b
+                  return . Left . either (Unexpected . pack) id $ AB.parseOnly errorParser b
                 StreamingBody tId -> do
                   valInfo <- takeMVar varInfo
                   return . Right $ StreamContext valInfo tId
-                _ -> return . Left $ HttpError "Unexpected response."
+                _ -> return . Left $ Unexpected "Unexpected response."
     where 
         retConnErr = return . Left . ConnectionError
 
@@ -75,26 +75,30 @@ data ControlConnection = ControlConnection
 data OK = OK
 
 subscribe :: ConnectionSettings -> SubscriptionRequest -> IO (Either LsError OK)
-subscribe settings req = withRequest settings req $ \res ->
-    case resBody res of
+subscribe settings req = withRequest settings req $ \body ->
+    case body of
       ContentBody b -> parseSimpleResponse b 
-      _ -> Left $ HttpError "Unexpected response."
+      _ -> Left $ Unexpected "Unexpected response."
 
 withRequest :: RequestConverter r
             => ConnectionSettings
             -> r
-            -> (HttpResponse -> Either LsError OK) 
+            -> (HttpBody -> Either LsError OK) 
             -> IO (Either LsError OK)
 withRequest settings req action = do
     conn <- newConnection settings
-    result <- try $ either (Left . ConnectionError) action <$> simpleHttpRequest conn req
+    result <- try $ either (Left . ConnectionError) doAction <$> simpleHttpRequest conn req
     closeConnection conn
     case result of
       Left err -> return . Left . ConnectionError $ showException err
       Right x -> return x
+    where doAction res = 
+            if resStatusCode res /= 200 then
+                Left $ HttpError (resStatusCode res) (resReason res)
+            else action $ resBody res
 
 parseSimpleResponse :: BS.ByteString -> Either LsError OK 
-parseSimpleResponse = either (Left . HttpError . pack) id . AB.parseOnly resParser 
+parseSimpleResponse = either (Left . Unexpected . pack) id . AB.parseOnly resParser 
     where 
         resParser = AB.eitherP errorParser okParser
         okParser = do

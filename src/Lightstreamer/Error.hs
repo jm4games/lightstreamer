@@ -11,7 +11,8 @@ import Data.ByteString.Char8 (pack)
 
 data LsError = LsError Int ByteString 
              | ConnectionError ByteString 
-             | HttpError ByteString
+             | HttpError Int ByteString
+             | Unexpected ByteString
              deriving Show
 
 errorParser :: Parser LsError

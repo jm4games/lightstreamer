@@ -66,8 +66,8 @@ instance RequestConverter StreamRequest where
                      <> idelMillis y <>? ("&LS_idel_millis=" <>+ fromShow)
         <> requestEnd h
 
-data SubscriptionRequest = ControlRequest
-    { subSession :: B.ByteString
+data SubscriptionRequest = SubscriptionRequest
+    { subSessionId :: B.ByteString
     , subTable :: B.ByteString
     , subTableOperation :: TableOperation
     }
@@ -97,7 +97,7 @@ data Snapshot = SnapTrue | SnapFalse | SnapLen Int
 instance RequestConverter SubscriptionRequest where
     convertToHttp req h = HttpRequest . toByteString $
          "POST /lighstreamer/control.txt&LS_session="
-      <> fromByteString (subSession req)
+      <> fromByteString (subSessionId req)
       <> ("&LS_table=" <>+ fromByteString $ subTable req) <>
       case subTableOperation req of
         TableDelete -> "&LS_op=delete"

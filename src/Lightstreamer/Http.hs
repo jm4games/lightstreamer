@@ -158,16 +158,17 @@ readHttpHeader = loop [] Nothing
               Nothing -> loop (p1:acc) res
             where 
                 (p1, p2) = B.breakByte W._cr more  
-                parse bytes Nothing = 
-                    let top = B.split W._space bytes
-                    in case top of
-                         [_, code, msg] -> Right $ Just HttpResponse
-                                              { resStatusCode = maybe 0 fst $ readInt code
-                                              , resReason = msg
-                                              , resHeaders = []
-                                              , resBody = None
-                                              }
-                         _ -> Left "Invalid HTTP response."
+                parse bytes Nothing =
+                    if B.count W._space (B.take 15 bytes) >= 2 then
+                        let (_, rest) = B.breakByte W._space bytes
+                        in let (code, rest') = B.breakByte W._space (B.drop 1 rest) 
+                            in Right $ Just HttpResponse
+                                         { resStatusCode = maybe 0 fst $ readInt code
+                                         , resReason = B.drop 1 rest' 
+                                         , resHeaders = []
+                                         , resBody = None
+                                         }
+                    else Left $ B.concat ["Invalid HTTP response. :", bytes]
                 parse bytes (Just a) =
                     let header = let (name, value) = B.breakByte W._colon bytes
                                  in HttpHeader name (B.dropWhile (==W._space) $ B.drop 1 value) 
