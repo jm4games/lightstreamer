@@ -48,7 +48,7 @@ newStreamConnection settings req handler = doHttpRequest $ do
                 StreamingBody tId -> do
                   valInfo <- takeMVar varInfo
                   return . Right $ StreamContext valInfo tId
-                _ -> return . Left $ Unexpected "Unexpected response."
+                _ -> return . Left $ Unexpected "new stream response."
     where 
         retConnErr = return . Left . ConnectionError
 
@@ -70,15 +70,13 @@ data BindRequest = BindRequest
 bindToSession :: BindRequest -> Either String StreamContext
 bindToSession = undefined
 
-data ControlConnection = ControlConnection
-
 data OK = OK
 
 subscribe :: ConnectionSettings -> SubscriptionRequest -> IO (Either LsError OK)
 subscribe settings req = withRequest settings req $ \body ->
     case body of
       ContentBody b -> parseSimpleResponse b 
-      _ -> Left $ Unexpected "Unexpected response."
+      _ -> Left $ Unexpected "subscribe response."
 
 withRequest :: RequestConverter r
             => ConnectionSettings
@@ -100,7 +98,7 @@ withRequest settings req action = do
 parseSimpleResponse :: BS.ByteString -> Either LsError OK 
 parseSimpleResponse = either (Left . Unexpected . pack) id . AB.parseOnly resParser 
     where 
-        resParser = AB.eitherP errorParser okParser
+        resParser = AB.choice [Right <$> okParser, Left <$> errorParser]
         okParser = do
             _ <- AB.string "OK"
             endOfLine
@@ -112,7 +110,7 @@ data ReconfigureRequest = ReconfigureRequest
     , rrTable :: BS.ByteString
     }
 
-reconfigureSubscription :: ControlConnection -> ReconfigureRequest -> Either String OK
+reconfigureSubscription :: ConnectionSettings -> ReconfigureRequest -> Either String OK
 reconfigureSubscription = undefined
 
 data ConstraintsRequest = ConstraintsRequest
@@ -120,10 +118,10 @@ data ConstraintsRequest = ConstraintsRequest
     , orRequestedMaxBandwith :: Maybe Int
     }
 
-changeConstraints :: ControlConnection -> ConstraintsRequest -> Either String OK
+changeConstraints :: ConnectionSettings -> ConstraintsRequest -> Either String OK
 changeConstraints = undefined
 
-destroyControlConnection :: ControlConnection -> BS.ByteString -> Either String OK
+destroyControlConnection :: ConnectionSettings -> BS.ByteString -> Either String OK
 destroyControlConnection = undefined
 
 sendMessage :: ConnectionSettings -> BS.ByteString -> BS.ByteString -> Either String OK

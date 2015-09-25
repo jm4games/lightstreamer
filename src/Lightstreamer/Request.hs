@@ -96,7 +96,7 @@ data Snapshot = SnapTrue | SnapFalse | SnapLen Int
 
 instance RequestConverter SubscriptionRequest where
     convertToHttp req h = HttpRequest . toByteString $
-         "POST /lighstreamer/control.txt&LS_session="
+         "POST /lightstreamer/control.txt?LS_session="
       <> fromByteString (subSessionId req)
       <> ("&LS_table=" <>+ fromByteString $ subTable req) <>
       case subTableOperation req of
@@ -106,7 +106,7 @@ instance RequestConverter SubscriptionRequest where
         TableStart t -> tbleOpts "&LS_op=start" t
       where 
           tbleOpts op t = op <>
-            ("&LS_op=add&lsId=" <>+ fromByteString $ tiId t)
+            ("&LS_Id=" <>+ fromByteString $ tiId t)
             <> ("&LS_schema=" <>+ fromByteString $ tiSchema t)
             <> subMode (tiMode t) 
             <> tiDataAdapter t <>? ("&LS_data_adapter=" <>+ fromByteString)
@@ -117,10 +117,10 @@ instance RequestConverter SubscriptionRequest where
             <> requestEnd h
           subMode x = 
             case x of
-              Raw -> "&LS_mode=raw"
-              Merge -> "&LS_mode=merge"
-              Distinct -> "&LS_mode=distinct"
-              Command -> "&LS_mode=command"
+              Raw -> "&LS_mode=RAW"
+              Merge -> "&LS_mode=MERGE"
+              Distinct -> "&LS_mode=DISTINCT"
+              Command -> "&LS_mode=COMMAND"
           fromUpdateFreq Unfiltered = "&LS_updated_max_frequency=unfiltered"
           fromUpdateFreq (Frequency dbl) = "&LS_updated_max_frequency=" <>+ fromShow $ dbl  
           fromSnapshot SnapTrue = "&LS_snapshot=true"
