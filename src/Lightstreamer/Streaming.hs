@@ -1,20 +1,25 @@
-{-# LANGUAGE OverloadedStrings, RankNTypes #-}
+{-# LANGUAGE OverloadedStrings, RankNTypes, DeriveDataTypeable #-}
 
 module Lightstreamer.Streaming
-    ( StreamInfo(..)
+    ( StreamException(..)
+    , StreamInfo(..)
     , StreamHandler(..)
+    , StreamState(..)
     , streamConsumer
+    , streamContinuationConsumer
     ) where
 
 import Control.Concurrent.MVar (MVar, putMVar)
+import Control.Exception (Exception, throwIO)
 import Control.Monad.IO.Class (liftIO)
 
 import Data.Attoparsec.ByteString (Parser, parseOnly, skipMany, string, takeTill)
 import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine
                                         , decimal, double, option)
-import Data.ByteString (ByteString)
+import Data.ByteString (ByteString, isPrefixOf)
 import Data.Conduit (Consumer, await)
 import Data.Functor ((<$>))
+import Data.Typeable (Typeable)
 
 data StreamInfo = StreamInfo
     { controlLink :: Maybe ByteString
@@ -37,23 +42,60 @@ class StreamHandler h where
     streamOpened :: h -> StreamInfo -> IO ()
     streamOpened _ _ = return ()
 
+data StreamException = StreamException ByteString deriving (Show, Typeable)
+
+instance Exception StreamException
+
+data StreamState h = StreamState
+    { rebindSession :: ByteString -> IO ()
+    , streamHandler :: h
+    }
+
 -- TODO: handle completion of mvar is stream is corrupted before getting stream info
 
-streamConsumer :: StreamHandler h => MVar StreamInfo -> h -> Consumer [ByteString] IO () 
-streamConsumer varInfo handler = 
-    await >>= maybe (liftIO $ putStrLn "No initial stream input ") consumeInfo
+type CloseConnection = IO ()
+
+streamConsumer :: StreamHandler h 
+               => MVar StreamInfo 
+               -> StreamState h
+               -> CloseConnection 
+               -> Consumer [ByteString] IO () 
+streamConsumer varInfo st cc = 
+    await >>= maybe (liftIO . throwIO $ StreamException "No initial stream input ") consumeInfo
     where
-        consumeInfo [] = streamConsumer varInfo handler
+        consumeInfo [] = streamConsumer varInfo st  cc
         consumeInfo (x:xs) =
             either 
-                (liftIO . streamCorrupted handler) 
+                (liftIO . streamCorrupted (streamHandler st))
                 (\i -> do
-                   liftIO $ putMVar varInfo i >> streamOpened handler i
-                   consumeValues xs)
+                   liftIO $ putMVar varInfo i >> streamOpened (streamHandler st) i
+                   consumeDataValues (sessionId i) st cc xs)
                 (parseOnly streamInfoParser x)
+        
+
+streamContinuationConsumer :: StreamHandler h 
+                           => ByteString 
+                           -> StreamState h 
+                           -> CloseConnection
+                           -> Consumer [ByteString] IO ()
+streamContinuationConsumer sId st cc = consumeDataValues sId st cc []
+
+consumeDataValues :: StreamHandler h 
+                  => ByteString
+                  -> StreamState h
+                  -> CloseConnection
+                  -> [ByteString] 
+                  -> Consumer [ByteString] IO ()
+consumeDataValues sId st cc = consumeValues
+    where
         loopConsume = await >>= maybe (return ()) consumeValues
+        streamD = streamData $ streamHandler st
         consumeValues [] = loopConsume 
-        consumeValues values = liftIO (streamData handler values) >> loopConsume
+        consumeValues values = 
+            if "LOOP" `isPrefixOf` last values then
+                liftIO $ streamD (init values) >> cc >> rebindSession st sId
+            else
+                liftIO (streamD values) >> loopConsume
 
 streamInfoParser :: Parser StreamInfo
 streamInfoParser = do

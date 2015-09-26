@@ -1,6 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Lightstreamer.Error where
+module Lightstreamer.Error
+    ( LsError(..)
+    , errorParser
+    , showException
+    ) where
 
 import Control.Exception (SomeException)
 

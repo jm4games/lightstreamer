@@ -1,9 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Lightstreamer.Request
-    ( HttpRequest
+    ( BindRequest (..)
+    , ConstraintsRequest(..)
+    , DestroyRequest (..)
+    , HttpRequest
     , KeepAliveMode(..)
     , PollingMode(..)
+    , RebindRequest (..)
+    , ReconfigureRequest(..)
     , RequestConverter(..)
     , Snapshot(..)
     , StandardHeaders
@@ -16,6 +21,7 @@ module Lightstreamer.Request
     , createStandardHeaders
     , defaultStreamRequest
     , defaultTableInfo
+    , mkBindRequest
     , serializeHttpRequest
     ) where
 
@@ -51,20 +57,33 @@ data PollingMode = PollingMode
     }
 
 instance RequestConverter StreamRequest where
-    convertToHttp req h = HttpRequest . toByteString $
+    convertToHttp req h = mkHttpRequest h $
         ("POST /lightstreamer/create_session.txt?LS_op2=create\
         \&LS_cid=mgQkwtwdysogQz2BJ4Ji%20kOj2Bg&LS_adapter_set="
         <>+ fromString $ srAdapterSet req)
-        <> srReportInfo req <>? ("&LS_reportInfo=" <>+ fromShow)
-        <> srContentLength req <>? ("&LS_content_length" <>+ fromShow)
-        <> srRequestedMaxBandwidth req <>? ("&LS_requested_max_bandwith=" <>+ fromShow)
+        <> fromReportInfo (srReportInfo req)
+        <> fromContentLength (srContentLength req)
+        <> fromMaxBandwidth (srRequestedMaxBandwidth req)
         <> srPassword req <>? ("&LS_password=" <>+ fromString)
-        <> srUser req <>? ("&LS_user=" <>+ fromString) <>
-        case srConnectionMode req of
-          Left (KeepAliveMode x) -> "&LS_keepalive_millis=" <> fromShow x
-          Right y -> "&LS_polling=true&LS_polling_millis=" <> fromShow (pollingMillis y)
-                     <> idelMillis y <>? ("&LS_idel_millis=" <>+ fromShow)
-        <> requestEnd h
+        <> srUser req <>? ("&LS_user=" <>+ fromString)
+        <> fromConnectionMode (srConnectionMode req)
+
+data BindRequest = BindRequest
+    { brConnectionMode :: Either KeepAliveMode PollingMode
+    , brContentLength :: Maybe Int
+    , brReportInfo :: Maybe Bool
+    , brRequestedMaxBandwidth :: Maybe Double
+    , brSessionId :: B.ByteString
+    }
+
+instance RequestConverter BindRequest where
+    convertToHttp req h = mkHttpRequest h $
+      "POST /lightstreamer/bind_session.txt?LS_session=" 
+      <> fromByteString (brSessionId req)
+      <> fromConnectionMode (brConnectionMode req)
+      <> fromContentLength (brContentLength req)
+      <> fromReportInfo (brReportInfo req) 
+      <> fromMaxBandwidth (brRequestedMaxBandwidth req)
 
 data SubscriptionRequest = SubscriptionRequest
     { subSessionId :: B.ByteString
@@ -95,10 +114,9 @@ data UpdateFrequency = Unfiltered | Frequency Double
 data Snapshot = SnapTrue | SnapFalse | SnapLen Int
 
 instance RequestConverter SubscriptionRequest where
-    convertToHttp req h = HttpRequest . toByteString $
-         "POST /lightstreamer/control.txt?LS_session="
-      <> fromByteString (subSessionId req)
-      <> ("&LS_table=" <>+ fromByteString $ subTable req) <>
+    convertToHttp req h = mkHttpRequest h $
+            controlPrefix (subSessionId req)
+            <> ("&LS_table=" <>+ fromByteString $ subTable req) <>
       case subTableOperation req of
         TableDelete -> "&LS_op=delete"
         TableAdd t -> tbleOpts "&LS_op=add" t
@@ -111,21 +129,53 @@ instance RequestConverter SubscriptionRequest where
             <> subMode (tiMode t) 
             <> tiDataAdapter t <>? ("&LS_data_adapter=" <>+ fromByteString)
             <> tiRequestedBufferSize t <>? ("&LS_requested_buffer_size=" <>+ fromShow)
-            <> tiRequestedMaxFrequency t <>? ("&LS_requested_max_frequency=" <>+ fromUpdateFreq)
+            <> tiRequestedMaxFrequency t <>? fromUpdateFreq 
             <> tiSelector t <>? ("&LS_selector=" <>+ fromByteString)
             <> tiSnapshot t <>? ("&LS_snapshot=" <>+ fromSnapshot)
-            <> requestEnd h
           subMode x = 
             case x of
               Raw -> "&LS_mode=RAW"
               Merge -> "&LS_mode=MERGE"
               Distinct -> "&LS_mode=DISTINCT"
               Command -> "&LS_mode=COMMAND"
-          fromUpdateFreq Unfiltered = "&LS_updated_max_frequency=unfiltered"
-          fromUpdateFreq (Frequency dbl) = "&LS_updated_max_frequency=" <>+ fromShow $ dbl  
           fromSnapshot SnapTrue = "&LS_snapshot=true"
           fromSnapshot SnapFalse = "&LS_snapshot=false"
           fromSnapshot (SnapLen x) = "&LS_snapshot=" <>+ fromShow $ x
+
+data ReconfigureRequest = ReconfigureRequest
+    { rrRequestedMaxFrequency :: Maybe UpdateFrequency
+    , rrSessionId :: B.ByteString
+    , rrTable :: B.ByteString
+    }
+
+instance RequestConverter ReconfigureRequest where
+    convertToHttp req h = mkHttpRequest h $ 
+         controlPrefix (rrSessionId req)
+      <> rrRequestedMaxFrequency req <>? fromUpdateFreq 
+      <> "&LS_op=reconf&LS_table=" <> fromByteString (rrTable req)
+
+data ConstraintsRequest = ConstraintsRequest
+    { conSessionId :: B.ByteString
+    , conRequestedMaxBandwith :: Maybe Int
+    }
+
+instance RequestConverter ConstraintsRequest where
+    convertToHttp req h = mkHttpRequest h $
+      controlPrefix (conSessionId req)
+      <> "&LS_op=constrain"
+      <> conRequestedMaxBandwith req <>? ("&LS_requested_max_bandwidth=" <>+ fromShow)
+
+data RebindRequest = RebindRequest { rebSessionId :: B.ByteString }
+
+instance RequestConverter RebindRequest where
+    convertToHttp req h = mkHttpRequest h $
+      controlPrefix (rebSessionId req) <> "&LS_op=force_rebind"
+
+data DestroyRequest = DestroyRequest { desSessionId :: B.ByteString }
+
+instance RequestConverter DestroyRequest where
+    convertToHttp req h = mkHttpRequest h $
+      controlPrefix (desSessionId req) <> "&LS_op=destory"
 
 type ToBuilder a = a -> Builder
 
@@ -135,6 +185,39 @@ b <>+ from = (<>) (fromByteString b) . from
 (<>?) :: Maybe a -> ToBuilder a -> Builder
 Nothing <>? _ = mempty
 (Just x) <>? y = y x
+
+mkHttpRequest :: StandardHeaders -> Builder -> HttpRequest
+mkHttpRequest (StandardHeaders h) b = HttpRequest . toByteString $ 
+        b <> " HTTP/1.1\r\n" <> h <> "Content-Length: 0\r\n\r\n"
+
+mkBindRequest :: B.ByteString -> StreamRequest -> BindRequest
+mkBindRequest sessionId sr = BindRequest
+    { brConnectionMode = srConnectionMode sr
+    , brContentLength = srContentLength sr
+    , brReportInfo = srReportInfo sr
+    , brRequestedMaxBandwidth = srRequestedMaxBandwidth sr
+    , brSessionId = sessionId
+    }
+
+fromReportInfo :: Maybe Bool -> Builder
+fromReportInfo x = x <>? ("&LS_report_info=" <>+ fromShow)
+
+fromMaxBandwidth :: Maybe Double -> Builder
+fromMaxBandwidth x = x <>? ("&LS_requested_max_bandwidth=" <>+ fromShow)
+
+fromContentLength :: Maybe Int -> Builder
+fromContentLength x = x <>? ("&LS_content_length=" <>+ fromShow)
+
+fromConnectionMode :: Either KeepAliveMode PollingMode -> Builder
+fromConnectionMode mode =
+    case mode of
+      Left (KeepAliveMode x) -> "&LS_keepalive_millis=" <> fromShow x
+      Right y -> "&LS_polling=true&LS_polling_millis=" <> fromShow (pollingMillis y)
+                 <> idelMillis y <>? ("&LS_idel_millis=" <>+ fromShow)
+
+fromUpdateFreq :: UpdateFrequency -> Builder
+fromUpdateFreq Unfiltered = "&LS_requested_max_frequency=unfiltered"
+fromUpdateFreq (Frequency dbl) = "&LS_requested_max_frequency=" <>+ fromShow $ dbl  
 
 defaultStreamRequest :: String -> StreamRequest
 defaultStreamRequest adapter = StreamRequest
@@ -167,5 +250,5 @@ createStandardHeaders host = StandardHeaders $
 serializeHttpRequest :: HttpRequest -> B.ByteString
 serializeHttpRequest (HttpRequest x) = x
 
-requestEnd :: StandardHeaders -> Builder
-requestEnd (StandardHeaders h) = " HTTP/1.1\r\n" <> h <> "Content-Length: 0\r\n\r\n"
+controlPrefix :: B.ByteString -> Builder
+controlPrefix = (<>) "POST /lightstreamer/control.txt?LS_session=" . fromByteString

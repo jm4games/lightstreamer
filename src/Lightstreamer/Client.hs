@@ -1,89 +1,104 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, RankNTypes #-}
 
 module Lightstreamer.Client where
 
-import Control.Exception (try)
-import Control.Concurrent (ThreadId)
+import Control.Exception (try, throwIO)
+import Control.Concurrent (ThreadId, myThreadId)
 import Control.Concurrent.MVar (newEmptyMVar, takeMVar)
 
 import Data.Functor ((<$>))
 import Data.Attoparsec.ByteString.Char8 (endOfLine)
+import Data.ByteString (ByteString)
 import Data.ByteString.Char8 (pack, unpack)
+import Data.Conduit (Consumer)
 
-import Lightstreamer.Error (LsError(..), errorParser, showException)
+import Lightstreamer.Error
 import Lightstreamer.Http
 import Lightstreamer.Request
 import Lightstreamer.Streaming
 
 import qualified Data.Attoparsec.ByteString as AB
-import qualified Data.ByteString as BS
 
 data StreamContext = StreamContext
     { info :: StreamInfo
     , threadId :: ThreadId
     }
 
--- TODO: use try catch on HTTP invokes and translate to LsError
+data OK = OK
 
 newStreamConnection :: StreamHandler h
                     => ConnectionSettings
                     -> StreamRequest
                     -> h 
                     -> IO (Either LsError StreamContext)
-newStreamConnection settings req handler = doHttpRequest $ do 
-    conn <- newConnection settings 
+newStreamConnection settings req handler = do 
     varInfo <- newEmptyMVar
-    sendHttpRequest conn req 
-    response <- readStreamedResponse conn (streamCorrupted handler . unpack) $ 
-                  streamConsumer varInfo handler
-    case response of
-        Left err -> retConnErr err
-        Right res ->
-          if resStatusCode res /= 200 then
-             return . Left $ HttpError (resStatusCode res) (resReason res)
-          else
-              case resBody res of
-                ContentBody b -> 
-                  return . Left . either (Unexpected . pack) id $ AB.parseOnly errorParser b
-                StreamingBody tId -> do
-                  valInfo <- takeMVar varInfo
-                  return . Right $ StreamContext valInfo tId
-                _ -> return . Left $ Unexpected "new stream response."
+    establishStreamConnection 
+        settings 
+        Nothing 
+        req
+        (streamCorrupted handler) 
+        (streamConsumer varInfo st)
+        (\tId -> takeMVar varInfo >>= \val -> return $ StreamContext val tId)
     where 
-        retConnErr = return . Left . ConnectionError
+        st = StreamState { streamHandler = handler, rebindSession = rebind }
+        rebind sId = do
+            tId <- myThreadId
+            result <- establishStreamConnection
+                        settings
+                        (Just tId)
+                        (mkBindRequest sId req)
+                        (streamCorrupted handler)
+                        (streamContinuationConsumer sId st)
+                        (const $ return ())
+            case result of
+              Left err -> throwIO . StreamException $
+                case err of
+                 LsError _ msg -> msg 
+                 ConnectionError msg -> msg
+                 ErrorPage msg -> msg
+                 HttpError _ msg -> msg
+                 Unexpected msg -> msg
+              _ -> return ()
 
-doHttpRequest :: IO (Either LsError a) -> IO (Either LsError a)
-doHttpRequest action = do
-    result <- try action 
+establishStreamConnection :: RequestConverter r
+                          => ConnectionSettings 
+                          -> Maybe ThreadId
+                          -> r
+                          -> (String -> IO ())
+                          -> (IO () -> Consumer [ByteString] IO ())
+                          -> (ThreadId -> IO a)
+                          -> IO (Either LsError a)
+establishStreamConnection settings tId req errHandle consumer resHandle = do
+    result <- try action
     case result of
       Left err -> return . Left . ConnectionError $ showException err
       Right x -> return x
-
-data BindRequest = BindRequest
-    { brConnectionMode :: Either KeepAliveMode PollingMode
-    , brContentLenght :: Maybe Int
-    , brReportInfo :: Maybe Bool
-    , brRequestedMaxBandwidth :: Maybe Int
-    , brSession :: BS.ByteString
-    }
-
-bindToSession :: BindRequest -> Either String StreamContext
-bindToSession = undefined
-
-data OK = OK
+    where 
+        action = do
+            conn <- newConnection settings
+            sendHttpRequest conn req
+            response <- readStreamedResponse conn tId (errHandle . unpack) (consumer $ closeConnection conn)
+            case response of
+              Left err -> return . Left $ ConnectionError err
+              Right res ->
+                if resStatusCode res /= 200 then
+                  return . Left $ HttpError (resStatusCode res) (resReason res)
+                else
+                  case resBody res of
+                    ContentBody b ->
+                       return . Left . either (Unexpected . pack) id $ AB.parseOnly errorParser b
+                    StreamingBody newId -> Right <$> resHandle newId 
+                    _ -> return . Left $ Unexpected "new stream response."
 
 subscribe :: ConnectionSettings -> SubscriptionRequest -> IO (Either LsError OK)
-subscribe settings req = withRequest settings req $ \body ->
-    case body of
-      ContentBody b -> parseSimpleResponse b 
-      _ -> Left $ Unexpected "subscribe response."
+subscribe = withSimpleRequest
 
-withRequest :: RequestConverter r
-            => ConnectionSettings
-            -> r
-            -> (HttpBody -> Either LsError OK) 
-            -> IO (Either LsError OK)
-withRequest settings req action = do
+withSimpleRequest :: RequestConverter r
+                  => ConnectionSettings
+                  -> r
+                  -> IO (Either LsError OK)
+withSimpleRequest settings req = do
     conn <- newConnection settings
     result <- try $ either (Left . ConnectionError) doAction <$> simpleHttpRequest conn req
     closeConnection conn
@@ -93,9 +108,12 @@ withRequest settings req action = do
     where doAction res = 
             if resStatusCode res /= 200 then
                 Left $ HttpError (resStatusCode res) (resReason res)
-            else action $ resBody res
+            else
+                case resBody res of
+                  ContentBody b -> parseSimpleResponse b
+                  _ -> Left $ Unexpected "response"
 
-parseSimpleResponse :: BS.ByteString -> Either LsError OK 
+parseSimpleResponse :: ByteString -> Either LsError OK 
 parseSimpleResponse = either (Left . Unexpected . pack) id . AB.parseOnly resParser 
     where 
         resParser = AB.choice [Right <$> okParser, Left <$> errorParser]
@@ -104,25 +122,17 @@ parseSimpleResponse = either (Left . Unexpected . pack) id . AB.parseOnly resPar
             endOfLine
             return OK
 
-data ReconfigureRequest = ReconfigureRequest
-    { rrRequestedMaxFrequency :: Maybe UpdateFrequency
-    , rrSession :: BS.ByteString
-    , rrTable :: BS.ByteString
-    }
+reconfigureSubscription :: ConnectionSettings -> ReconfigureRequest -> IO (Either LsError OK)
+reconfigureSubscription = withSimpleRequest
 
-reconfigureSubscription :: ConnectionSettings -> ReconfigureRequest -> Either String OK
-reconfigureSubscription = undefined
+changeConstraints :: ConnectionSettings -> ConstraintsRequest -> IO (Either LsError OK)
+changeConstraints = withSimpleRequest 
 
-data ConstraintsRequest = ConstraintsRequest
-    { orSession :: BS.ByteString
-    , orRequestedMaxBandwith :: Maybe Int
-    }
+requestRebind :: ConnectionSettings -> ByteString -> IO (Either LsError OK)
+requestRebind settings = withSimpleRequest settings . RebindRequest 
 
-changeConstraints :: ConnectionSettings -> ConstraintsRequest -> Either String OK
-changeConstraints = undefined
+destroySession :: ConnectionSettings -> ByteString -> IO (Either LsError OK)
+destroySession settings = withSimpleRequest settings . DestroyRequest
 
-destroyControlConnection :: ConnectionSettings -> BS.ByteString -> Either String OK
-destroyControlConnection = undefined
-
-sendMessage :: ConnectionSettings -> BS.ByteString -> BS.ByteString -> Either String OK
+sendMessage :: ConnectionSettings -> ByteString -> ByteString -> Either String OK
 sendMessage = undefined

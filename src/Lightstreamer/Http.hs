@@ -95,10 +95,11 @@ connectionProducer conn = loop
             unless (B.null bytes) $ yield bytes >> loop 
         
 readStreamedResponse :: Connection 
+                     -> Maybe ThreadId 
                      -> (B.ByteString -> IO ())
                      -> Consumer [B.ByteString] IO () 
                      -> IO (Either B.ByteString HttpResponse)
-readStreamedResponse conn errHandle streamSink = do 
+readStreamedResponse conn tId errHandle streamSink = do 
     (rSrc, res) <- connectionProducer conn $$+ readHttpHeader
     case find contentHeader $ resHeaders res of
       Just (HttpHeader "Content-Length" val) -> do
@@ -106,8 +107,9 @@ readStreamedResponse conn errHandle streamSink = do
         return $ Right res { resBody = ContentBody $ toStrict body } 
       
       Just (HttpHeader "Transfer-Encoding" _) -> do
-        a <- forkIO $ try (rSrc $=+ chunkConduit B.empty $$+- streamSink) >>=
+        let action = try (rSrc $=+ chunkConduit B.empty $$+- streamSink) >>=
                         either (errHandle . showException) return
+        a <- maybe (forkIO action) ((>>) action . return) tId
         return $ Right res { resBody = StreamingBody a }
       _ -> throwHttpException "Could not determine body type of response."
                 
