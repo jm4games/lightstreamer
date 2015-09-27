@@ -8,6 +8,7 @@ module Lightstreamer.Client
     , newStreamConnection
     , reconfigureSubscription
     , requestRebind
+    , sendAsyncMessage
     , sendMessage
     , subscribe
     ) where
@@ -88,7 +89,8 @@ establishStreamConnection settings tId req errHandle consumer resHandle = do
         action = do
             conn <- newConnection settings
             sendHttpRequest conn req
-            response <- readStreamedResponse conn tId (errHandle . unpack) (consumer $ closeConnection conn)
+            response <- 
+              readStreamedResponse conn tId (errHandle . unpack) (consumer $ closeConnection conn)
             case response of
               Left err -> return . Left $ ConnectionError err
               Right res ->
@@ -144,5 +146,8 @@ requestRebind settings = withSimpleRequest settings . RebindRequest
 destroySession :: ConnectionSettings -> ByteString -> IO (Either LsError OK)
 destroySession settings = withSimpleRequest settings . DestroyRequest
 
-sendMessage :: ConnectionSettings -> ByteString -> ByteString -> Either String OK
-sendMessage = undefined
+sendMessage :: ConnectionSettings -> MessageRequest -> IO (Either LsError OK)
+sendMessage = withSimpleRequest 
+
+sendAsyncMessage :: ConnectionSettings -> AsyncMessageRequest -> IO (Either LsError OK)
+sendAsyncMessage = withSimpleRequest 

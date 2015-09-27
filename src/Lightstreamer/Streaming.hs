@@ -13,7 +13,7 @@ import Control.Concurrent.MVar (MVar, putMVar)
 import Control.Exception (Exception, throwIO)
 import Control.Monad.IO.Class (liftIO)
 
-import Data.Attoparsec.ByteString (Parser, parseOnly, skipMany, string, takeTill)
+import Data.Attoparsec.ByteString (Parser, choice, parseOnly, skipMany, string, takeTill)
 import Data.Attoparsec.ByteString.Char8 (endOfLine, isEndOfLine
                                         , decimal, double, option)
 import Data.ByteString (ByteString, isPrefixOf)
@@ -50,6 +50,19 @@ data StreamState h = StreamState
     { rebindSession :: ByteString -> IO ()
     , streamHandler :: h
     }
+
+data StreamItem = End
+                | EndSnapshot 
+                | EndWithCause Int ByteString
+                | Loop 
+                | Message
+                | Probe 
+                | Overflow
+                | Undefined ByteString
+                | Update TableEntry 
+                deriving (Show, Eq)
+
+data TableEntry = TableEntry deriving (Show, Eq)
 
 -- TODO: handle completion of mvar is stream is corrupted before getting stream info
 
@@ -90,8 +103,9 @@ consumeDataValues sId st cc = consumeValues
     where
         loopConsume = await >>= maybe (return ()) consumeValues
         streamD = streamData $ streamHandler st
-        consumeValues [] = loopConsume 
-        consumeValues values = 
+        consumeValues = processValues . filter (not . isPrefixOf "PROBE")
+        processValues [] = loopConsume
+        processValues values = 
             if "LOOP" `isPrefixOf` last values then
                 liftIO $ streamD (init values) >> cc >> rebindSession st sId
             else
@@ -136,3 +150,19 @@ streamInfoParser = do
 
 parseOptional :: Parser a -> Parser (Maybe a)
 parseOptional = option Nothing . (<$>) Just
+
+streamDataParser :: Parser StreamItem
+streamDataParser = undefined
+    where
+        loopParser = string "LOOP" >> endOfLine >> return Loop
+        probeParser = string "PROBE" >> endOfLine >> return Probe
+        endParser = string "END" >> choice [causeParser, endOfLine >> return End]
+            where 
+                causeParser = do
+                    _ <- string " "
+                    code <- decimal
+                    endOfLine
+                    return $ EndWithCause code (errMsg code) 
+                errMsg _ = "Error message not available."
+
+

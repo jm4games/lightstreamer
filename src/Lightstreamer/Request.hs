@@ -1,13 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Lightstreamer.Request
-    ( BindRequest (..)
+    ( AsyncMessageRequest(..)
+    , BindRequest(..)
     , ConstraintsRequest(..)
     , DestroyRequest (..)
     , HttpRequest
     , KeepAliveMode(..)
+    , MessageRequest(..)
     , PollingMode(..)
-    , RebindRequest (..)
+    , RebindRequest(..)
     , ReconfigureRequest(..)
     , RequestConverter(..)
     , Snapshot(..)
@@ -57,7 +59,7 @@ data PollingMode = PollingMode
     }
 
 instance RequestConverter StreamRequest where
-    convertToHttp req h = mkHttpRequest h $
+    convertToHttp req = mkHttpRequest $
         ("POST /lightstreamer/create_session.txt?LS_op2=create\
         \&LS_cid=mgQkwtwdysogQz2BJ4Ji%20kOj2Bg&LS_adapter_set="
         <>+ fromString $ srAdapterSet req)
@@ -77,7 +79,7 @@ data BindRequest = BindRequest
     }
 
 instance RequestConverter BindRequest where
-    convertToHttp req h = mkHttpRequest h $
+    convertToHttp req = mkHttpRequest $
       "POST /lightstreamer/bind_session.txt?LS_session=" 
       <> fromByteString (brSessionId req)
       <> fromConnectionMode (brConnectionMode req)
@@ -114,7 +116,7 @@ data UpdateFrequency = Unfiltered | Frequency Double
 data Snapshot = SnapTrue | SnapFalse | SnapLen Int
 
 instance RequestConverter SubscriptionRequest where
-    convertToHttp req h = mkHttpRequest h $
+    convertToHttp req = mkHttpRequest $
             controlPrefix (subSessionId req)
             <> ("&LS_table=" <>+ fromByteString $ subTable req) <>
       case subTableOperation req of
@@ -149,7 +151,7 @@ data ReconfigureRequest = ReconfigureRequest
     }
 
 instance RequestConverter ReconfigureRequest where
-    convertToHttp req h = mkHttpRequest h $ 
+    convertToHttp req = mkHttpRequest $ 
          controlPrefix (rrSessionId req)
       <> rrRequestedMaxFrequency req <>? fromUpdateFreq 
       <> "&LS_op=reconf&LS_table=" <> fromByteString (rrTable req)
@@ -160,7 +162,7 @@ data ConstraintsRequest = ConstraintsRequest
     }
 
 instance RequestConverter ConstraintsRequest where
-    convertToHttp req h = mkHttpRequest h $
+    convertToHttp req = mkHttpRequest $
       controlPrefix (conSessionId req)
       <> "&LS_op=constrain"
       <> conRequestedMaxBandwith req <>? ("&LS_requested_max_bandwidth=" <>+ fromShow)
@@ -168,14 +170,38 @@ instance RequestConverter ConstraintsRequest where
 data RebindRequest = RebindRequest { rebSessionId :: B.ByteString }
 
 instance RequestConverter RebindRequest where
-    convertToHttp req h = mkHttpRequest h $
+    convertToHttp req = mkHttpRequest $
       controlPrefix (rebSessionId req) <> "&LS_op=force_rebind"
 
 data DestroyRequest = DestroyRequest { desSessionId :: B.ByteString }
 
 instance RequestConverter DestroyRequest where
-    convertToHttp req h = mkHttpRequest h $
+    convertToHttp req = mkHttpRequest $
       controlPrefix (desSessionId req) <> "&LS_op=destory"
+
+data MessageRequest = MessageRequest
+    { smMessage :: B.ByteString
+    , smSessionId :: B.ByteString
+    }
+
+instance RequestConverter MessageRequest where
+    convertToHttp req = mkHttpRequest $ 
+      msgPrefix (smSessionId req) <> appendMessage (smMessage req)
+
+data AsyncMessageRequest = AsyncMessageRequest
+    { amMaxWait :: Maybe Int
+    , amMessage :: B.ByteString
+    , amProgressiveNumber :: Int
+    , amSequenceId :: B.ByteString
+    , amSessionId :: B.ByteString
+    }
+
+instance RequestConverter AsyncMessageRequest where
+    convertToHttp req = mkHttpRequest $
+      msgPrefix (amSessionId req) <> appendMessage (amMessage req)
+      <> ("&LS_sequence=" <>+ fromShow) (amSequenceId req)
+      <> ("&LS_msg_prog=" <>+ fromShow) (amProgressiveNumber req)
+      <> amMaxWait req <>? ("&LS_max_wait=" <>+ fromShow)
 
 type ToBuilder a = a -> Builder
 
@@ -186,8 +212,8 @@ b <>+ from = (<>) (fromByteString b) . from
 Nothing <>? _ = mempty
 (Just x) <>? y = y x
 
-mkHttpRequest :: StandardHeaders -> Builder -> HttpRequest
-mkHttpRequest (StandardHeaders h) b = HttpRequest . toByteString $ 
+mkHttpRequest :: Builder -> StandardHeaders -> HttpRequest
+mkHttpRequest b (StandardHeaders h) = HttpRequest . toByteString $ 
         b <> " HTTP/1.1\r\n" <> h <> "Content-Length: 0\r\n\r\n"
 
 mkBindRequest :: B.ByteString -> StreamRequest -> BindRequest
@@ -218,6 +244,9 @@ fromConnectionMode mode =
 fromUpdateFreq :: UpdateFrequency -> Builder
 fromUpdateFreq Unfiltered = "&LS_requested_max_frequency=unfiltered"
 fromUpdateFreq (Frequency dbl) = "&LS_requested_max_frequency=" <>+ fromShow $ dbl  
+
+appendMessage :: B.ByteString -> Builder
+appendMessage = (<>) "&LS_message=" . fromByteString
 
 defaultStreamRequest :: String -> StreamRequest
 defaultStreamRequest adapter = StreamRequest
@@ -252,3 +281,6 @@ serializeHttpRequest (HttpRequest x) = x
 
 controlPrefix :: B.ByteString -> Builder
 controlPrefix = (<>) "POST /lightstreamer/control.txt?LS_session=" . fromByteString
+
+msgPrefix :: B.ByteString -> Builder
+msgPrefix = (<>) "POST /lightstreamer/send_message.txt?LS_session=" . fromByteString
