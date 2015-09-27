@@ -1,6 +1,16 @@
 {-# LANGUAGE OverloadedStrings, RankNTypes #-}
 
-module Lightstreamer.Client where
+module Lightstreamer.Client
+    ( OK
+    , StreamContext(info, threadId)
+    , changeConstraints
+    , destroySession 
+    , newStreamConnection
+    , reconfigureSubscription
+    , requestRebind
+    , sendMessage
+    , subscribe
+    ) where
 
 import Control.Exception (try, throwIO)
 import Control.Concurrent (ThreadId, myThreadId)
@@ -50,7 +60,7 @@ newStreamConnection settings req handler = do
                         (mkBindRequest sId req)
                         (streamCorrupted handler)
                         (streamContinuationConsumer sId st)
-                        (const $ return ())
+                        (\_ -> return ())
             case result of
               Left err -> throwIO . StreamException $
                 case err of
