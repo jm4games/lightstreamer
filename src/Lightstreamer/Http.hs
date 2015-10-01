@@ -14,6 +14,7 @@ module Lightstreamer.Http
         , resReason
         , resStatusCode
         )
+    , TlsSettings(..)
     , newConnection
     , readStreamedResponse
     , sendHttpRequest
@@ -21,14 +22,15 @@ module Lightstreamer.Http
     ) where
 
 import Control.Concurrent (ThreadId, forkIO)
-import Control.Exception (Exception, throwIO, try)
+import Control.Exception (Exception, catch, throwIO, try)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (MonadIO(..))
 
-import Data.ByteString.Char8 (readInt)
-import Data.ByteString.Lazy (toStrict)
+import Data.ByteString.Char8 (readInt, pack)
+import Data.ByteString.Lazy (toStrict, fromStrict)
 import Data.ByteString.Lex.Integral (readHexadecimal)
 import Data.Conduit (Consumer, Conduit, Producer, ($$+), ($$+-), ($=+), await, leftover, yield)
+import Data.Default (def)
 import Data.List (find)
 import Data.Typeable (Typeable)
 
@@ -36,16 +38,25 @@ import Lightstreamer.Error (showException)
 import Lightstreamer.Request (RequestConverter(..), StandardHeaders
                              , createStandardHeaders, serializeHttpRequest)
 
+import System.X509 (getSystemCertificateStore)
+
 import qualified Data.ByteString as B
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Word8 as W
 
 import qualified Network.Socket as S
 import qualified Network.Socket.ByteString as SB
+import qualified Network.TLS as TLS
+import qualified Network.TLS.Extra as TLS
 
 data ConnectionSettings = ConnectionSettings
     { csHost :: String
     , csPort :: Int
+    , csTlsSettings :: Maybe TlsSettings
+    }
+
+data TlsSettings = TlsSettings
+    { tlsDisableCertificateValidation :: Bool
     }
 
 data Connection = Connection
@@ -77,12 +88,43 @@ newConnection settings = do
     sock <- S.socket S.AF_INET S.Stream 6 --6 = tcp 
     S.setSocketOption sock S.NoDelay 1
     S.connect sock sockAddr
-    return Connection
-        { closeConnection = S.close sock
-        , readBytes = SB.recv sock 8192
-        , standardHeaders = createStandardHeaders $ csHost settings 
-        , writeBytes = SB.sendAll sock 
-        }
+    maybe (mkConnection sock) (mkTlsConnection (csHost settings) sock) $ csTlsSettings settings
+    where 
+        mkConnection sock = return Connection
+            { closeConnection = S.close sock
+            , readBytes = SB.recv sock 8192
+            , standardHeaders = createStandardHeaders $ csHost settings 
+            , writeBytes = SB.sendAll sock 
+            }
+        mkTlsConnection host sock tls = do
+            certStore <- getSystemCertificateStore
+            context <- TLS.contextNew sock $ mkClientParams certStore
+            TLS.handshake context
+            return Connection
+                { closeConnection = 
+                    -- Closing an SSL connection gracefully involves writing/reading
+                    -- on the socket.  But when this is called the socket might be
+                    -- already closed, and we get a @ResourceVanished@. 
+                    catch (TLS.bye context >> TLS.contextClose context) (\_ -> return ())
+                , readBytes = TLS.recvData context
+                , writeBytes = TLS.sendData context . fromStrict
+                , standardHeaders = createStandardHeaders $ csHost settings
+                }
+            where
+                mkClientParams certStore = 
+                    (TLS.defaultParamsClient host (pack . show $ csPort settings))
+                        { TLS.clientSupported = 
+                            def { TLS.supportedCiphers = TLS.ciphersuite_all }
+                        , TLS.clientShared = def
+                            { TLS.sharedCAStore = certStore 
+                            , TLS.sharedValidationCache = validationCache
+                            }
+                        }
+                    where validationCache 
+                            | tlsDisableCertificateValidation tls =
+                                TLS.ValidationCache (\_ _ _ -> return TLS.ValidationCachePass)
+                                        (\_ _ _ -> return ())
+                            | otherwise = def
 
 sendHttpRequest :: RequestConverter r => Connection -> r -> IO ()
 sendHttpRequest conn req = writeBytes conn . serializeHttpRequest $ 
