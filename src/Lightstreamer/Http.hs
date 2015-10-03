@@ -200,11 +200,11 @@ readHttpHeader = loop [] Nothing
 
               Nothing -> loop (p1:acc) res
             where 
-                (p1, p2) = B.breakByte W._cr more  
+                (p1, p2) = B.break (==W._cr) more  
                 parse bytes Nothing =
                     if B.count W._space (B.take 15 bytes) >= 2 then
-                        let (_, rest) = B.breakByte W._space bytes
-                        in let (code, rest') = B.breakByte W._space (B.drop 1 rest) 
+                        let (_, rest) = B.break (==W._space) bytes
+                        in let (code, rest') = B.break (==W._space) (B.drop 1 rest) 
                             in Right $ Just HttpResponse
                                          { resStatusCode = maybe 0 fst $ readInt code
                                          , resReason = B.drop 1 rest' 
@@ -213,7 +213,7 @@ readHttpHeader = loop [] Nothing
                                          }
                     else Left $ B.concat ["Invalid HTTP response. :", bytes]
                 parse bytes (Just a) =
-                    let header = let (name, value) = B.breakByte W._colon bytes
+                    let header = let (name, value) = B.break (==W._colon) bytes
                                  in HttpHeader name (B.dropWhile (==W._space) $ B.drop 1 value) 
                     in Right $ Just a { resHeaders = header : resHeaders a } 
 
@@ -248,6 +248,6 @@ readChunks = loop []
                             let (chunk, rest) = B.splitAt size $ B.drop 2 p2
                             in loop (chunk:acc) $ B.drop 2 rest
                           else retRight acc buf 
-                where (p1, p2) = B.breakByte W._cr buf
+                where (p1, p2) = B.break (==W._cr) buf
         retRight acc rest = Right (reverse acc, rest)
         hexToDec = maybe (Left "Invalid hexidecimal number.") (Right . fst) . readHexadecimal
