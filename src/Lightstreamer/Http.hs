@@ -1,6 +1,5 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE DeriveDataTypeable, OverloadedStrings, RankNTypes,
+             ScopedTypeVariables #-}
 
 module Lightstreamer.Http
     ( Connection(closeConnection)
@@ -22,7 +21,7 @@ module Lightstreamer.Http
     ) where
 
 import Control.Concurrent (ThreadId, forkIO)
-import Control.Exception (Exception, catch, throwIO, try)
+import Control.Exception (Exception, SomeException, catch, throwIO, try)
 import Control.Monad (unless)
 import Control.Monad.IO.Class (MonadIO(..))
 
@@ -105,7 +104,7 @@ newConnection settings = do
                     -- Closing an SSL connection gracefully involves writing/reading
                     -- on the socket.  But when this is called the socket might be
                     -- already closed, and we get a @ResourceVanished@. 
-                    catch (TLS.bye context >> TLS.contextClose context) (\_ -> return ())
+                    catch (TLS.bye context >> TLS.contextClose context) (\(_ :: SomeException) -> return ())
                 , readBytes = TLS.recvData context
                 , writeBytes = TLS.sendData context . fromStrict
                 , standardHeaders = createStandardHeaders $ csHost settings
